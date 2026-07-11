@@ -13,6 +13,11 @@ def test_build_row_places_date_and_notes_leaving_middle_blank() -> None:
     assert row == ["2026-07-11", "", "", "", "", "Cash sale, $200, Wedding Cake"]
 
 
+def test_build_row_defuses_leading_formula_in_notes() -> None:
+    row = build_row("=IMPORTXML(evil)", date(2026, 7, 11))
+    assert row[5] == "'=IMPORTXML(evil)"
+
+
 # --- append_row (Sheets adapter, mocked client) ---
 
 
@@ -33,3 +38,13 @@ def test_append_row_appends_to_all_transactions_range(
         body={"values": [["2026-07-11", "", "", "", "", "Cash sale"]]},
     )
     append.return_value.execute.assert_called_once_with()
+
+
+def test_append_row_raises_clear_error_when_sheet_id_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SHEET_ID", raising=False)
+    monkeypatch.setattr("src.sheets._build_service", MagicMock())
+
+    with pytest.raises(RuntimeError, match="SHEET_ID"):
+        append_row(["2026-07-11", "", "", "", "", "Cash sale"])

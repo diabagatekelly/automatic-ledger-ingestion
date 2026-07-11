@@ -16,6 +16,19 @@ from googleapiclient.discovery import build as discovery_build
 
 _SHEET_RANGE = "All Transactions!A:F"
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+_FORMULA_TRIGGERS = ("=", "+", "-", "@")
+
+
+def _defuse_formula(text: str) -> str:
+    """Neutralize spreadsheet formula injection.
+
+    With ``valueInputOption=USER_ENTERED`` a cell beginning with a formula
+    trigger (``= + - @``) is evaluated as a formula. Prefixing an apostrophe
+    forces Sheets to treat the value as literal text.
+    """
+    if text.startswith(_FORMULA_TRIGGERS):
+        return "'" + text
+    return text
 
 
 def build_row(text: str, today: date) -> list[str]:
@@ -24,7 +37,7 @@ def build_row(text: str, today: date) -> list[str]:
     Columns: Date | Contract Name | Category | Type | Amount | Source/Notes.
     For this slice only Date and Source/Notes are populated.
     """
-    return [today.isoformat(), "", "", "", "", text]
+    return [today.isoformat(), "", "", "", "", _defuse_formula(text)]
 
 
 def _build_service() -> Any:
@@ -38,11 +51,19 @@ def _build_service() -> Any:
     return discovery_build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
 
+def _sheet_id() -> str:
+    """Return the configured Sheet ID, failing fast with a clear message."""
+    sheet_id = os.getenv("SHEET_ID")
+    if not sheet_id:
+        raise RuntimeError("SHEET_ID environment variable is not set")
+    return sheet_id
+
+
 def append_row(row: list[str]) -> None:
     """Append one row to the 'All Transactions' tab of the configured Sheet."""
     service = _build_service()
     service.spreadsheets().values().append(
-        spreadsheetId=os.environ["SHEET_ID"],
+        spreadsheetId=_sheet_id(),
         range=_SHEET_RANGE,
         valueInputOption="USER_ENTERED",
         body={"values": [row]},
