@@ -6,9 +6,18 @@ from src.main import verify_webhook, webhook
 class FakeRequest:
     """Minimal stand-in for a Flask Request for the webhook entry point."""
 
-    def __init__(self, method: str, args: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        method: str,
+        args: dict[str, str] | None = None,
+        data: str = "",
+    ) -> None:
         self.method = method
         self.args = args or {}
+        self._data = data
+
+    def get_data(self, as_text: bool = False) -> str:
+        return self._data
 
 
 # --- verify_webhook (pure) ---
@@ -49,9 +58,15 @@ def test_webhook_get_completes_verification(monkeypatch: pytest.MonkeyPatch) -> 
     assert body == "99"
 
 
-def test_webhook_post_acks() -> None:
-    _, status = webhook(FakeRequest("POST"))  # type: ignore[arg-type]
+def test_webhook_post_appends_row_and_acks(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, list[str]] = {}
+    monkeypatch.setattr("src.main.append_row", lambda row: captured.__setitem__("row", row))
+
+    _, status = webhook(FakeRequest("POST", data="Cash sale, $200"))  # type: ignore[arg-type]
+
     assert status == 200
+    assert captured["row"][0]  # Date column populated
+    assert captured["row"][5] == "Cash sale, $200"  # Source/Notes column
 
 
 def test_webhook_rejects_other_methods() -> None:

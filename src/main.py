@@ -10,9 +10,12 @@ Gemini parsing and Google Sheets persistence are added in later slices.
 from __future__ import annotations
 
 import os
+from datetime import date
 
 import functions_framework
 from flask import Request
+
+from src.sheets import append_row, build_row
 
 
 def verify_webhook(
@@ -43,7 +46,10 @@ def webhook(request: Request) -> tuple[str, int]:
         )
 
     if request.method == "POST":
-        # TODO(#3, #4): parse text/image/voice via Gemini and append to the Sheet.
+        # TODO(#4): parse text/image/voice via Gemini into structured columns.
+        # For now the raw payload lands in Source/Notes with today's date.
+        text = request.get_data(as_text=True)
+        append_row(build_row(text, date.today()))
         return ("", 200)
 
     return ("method not allowed", 405)
