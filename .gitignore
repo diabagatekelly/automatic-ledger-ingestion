@@ -32,3 +32,4 @@ Thumbs.db
 # --- Claude local/session context (not published) ---
 CLAUDE.local.md
 docs/STATUS.md
+docs/WORKFLOW.md
