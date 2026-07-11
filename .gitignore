@@ -28,3 +28,7 @@ build/
 Thumbs.db
 .idea/
 .vscode/
+
+# --- Claude local/session context (not published) ---
+CLAUDE.local.md
+docs/STATUS.md
