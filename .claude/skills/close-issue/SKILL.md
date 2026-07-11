@@ -7,16 +7,13 @@ description: Run the standard close-out checklist for a completed vertical slice
 
 The repeatable "definition of done" for this project. Run it whenever a slice's
 code is finished and its PR is open. **Scale depth to diff size** — a ~40-line
-slice does not need every review agent; a large or risky one does. Don't
-gold-plate (see `docs/WORKFLOW.md` guardrail).
+slice does not need every review agent; a large or risky one does. Don't gold-plate.
 
 ## 1. Local quality gate — must be green
-Same gate as CI (`.github/workflows/ci.yml`). Run from the repo root:
+One script, shared with CI so the two never drift: `scripts/check.sh` (also run by
+`.github/workflows/ci.yml`). Activate the venv first, then from the repo root:
 ```bash
-./.venv/Scripts/python.exe -m ruff check .
-./.venv/Scripts/python.exe -m black --check --target-version py311 .
-./.venv/Scripts/python.exe -m mypy src
-./.venv/Scripts/python.exe -m pytest --cov=src --cov-report=term-missing --cov-fail-under=70
+bash scripts/check.sh
 ```
 Auto-fix format/imports with `ruff check --fix .` and `black --target-version py311 .`.
 

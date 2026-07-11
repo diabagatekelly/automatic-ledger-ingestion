@@ -38,7 +38,7 @@ WhatsApp Cloud API · Google Sheets · GitHub Actions (CI + keyless CD via WIF).
 ```bash
 python -m venv .venv && source .venv/Scripts/activate   # Windows Git Bash
 pip install -r requirements.txt -r requirements-dev.txt
-ruff check . && black --check . && mypy src && pytest   # same gate as CI
+bash scripts/check.sh                                   # same gate as CI (scripts/check.sh)
 functions-framework --target=webhook --debug            # run locally
 ```
 
