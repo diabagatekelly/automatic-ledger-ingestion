@@ -1,0 +1,41 @@
+name: Deploy
+
+# Continuous deployment to Cloud Functions (Gen2) with KEYLESS auth via
+# Workload Identity Federation — no service-account JSON is ever stored.
+#
+# Trigger is manual (workflow_dispatch) until WIF is provisioned on GCP and
+# these repo secrets exist:
+#   GCP_WIF_PROVIDER  - full resource name of the workload identity provider
+#   GCP_DEPLOY_SA     - deployer service-account email
+# Once configured, switch the trigger to:  push -> branches: [main]
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # required for keyless auth via WIF
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy Cloud Function (Gen2)
+        run: |
+          gcloud functions deploy catering-ledger-webhook \
+            --gen2 \
+            --runtime=python312 \
+            --region=us-central1 \
+            --source=. \
+            --entry-point=webhook \
+            --trigger-http \
+            --allow-unauthenticated
