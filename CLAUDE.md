@@ -29,12 +29,16 @@ WhatsApp Cloud API · Google Sheets · GitHub Actions (CI + keyless CD via WIF).
 - **`main` is protected.** No direct pushes; open a PR, the `quality` check must pass to merge.
 - **Secrets never in git.** Use env / GCP Secret Manager. `.gitignore` blocks `.env`, keys, SA JSON.
 - **Reuse the data contract** in `docs/ARCHITECTURE.md` across text, image, and voice slices.
+- **Close out every slice with `/close-issue`.** When a slice is done and its PR is open, run the
+  [`close-issue`](.claude/skills/close-issue/SKILL.md) skill: local gate → live/manual validation →
+  plugin review pass (`code-review-protocol`, `unit-test-reviewer`, `quality-assurance`,
+  `security-compliance`) + Sourcery → manual-testing guide → `STATUS.md` handoff. Scale depth to diff size.
 
 ## Local dev
 ```bash
 python -m venv .venv && source .venv/Scripts/activate   # Windows Git Bash
 pip install -r requirements.txt -r requirements-dev.txt
-ruff check . && black --check . && mypy src && pytest   # same gate as CI
+bash scripts/check.sh                                   # same gate as CI (scripts/check.sh)
 functions-framework --target=webhook --debug            # run locally
 ```
 
