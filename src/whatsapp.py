@@ -18,19 +18,35 @@ from __future__ import annotations
 from typing import Any
 
 
+def _dicts(value: Any) -> list[dict[str, Any]]:
+    """Return only the dict elements of a value that should be a JSON array.
+
+    Anything that isn't a list (``None``, a bare dict, a scalar) collapses to
+    an empty list, so an off-spec payload is skipped rather than raising.
+    """
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
 def extract_message_texts(payload: dict[str, Any]) -> list[str]:
     """Return the ``text.body`` of every text message in a webhook payload.
 
-    Tolerates missing keys and status/non-text callbacks by yielding an empty
-    list rather than raising.
+    Tolerates missing keys, status/non-text callbacks, and off-spec container
+    types by yielding an empty list rather than raising.
     """
     texts: list[str] = []
-    for entry in payload.get("entry", []):
-        for change in entry.get("changes", []):
-            value = change.get("value", {})
-            for message in value.get("messages", []):
+    if not isinstance(payload, dict):
+        return texts
+    for entry in _dicts(payload.get("entry")):
+        for change in _dicts(entry.get("changes")):
+            value = change.get("value")
+            if not isinstance(value, dict):
+                continue
+            for message in _dicts(value.get("messages")):
                 if message.get("type") == "text":
-                    body = message.get("text", {}).get("body")
+                    text = message.get("text")
+                    body = text.get("body") if isinstance(text, dict) else None
                     if body:
                         texts.append(body)
     return texts

@@ -1,6 +1,7 @@
 import pytest
 
 from src.main import verify_webhook, webhook
+from tests.factories import text_message_envelope
 
 
 class FakeRequest:
@@ -18,15 +19,6 @@ class FakeRequest:
 
     def get_json(self, silent: bool = False) -> object:
         return self._json
-
-
-def _text_envelope(body: str) -> dict:
-    """A minimal WhatsApp inbound text-message webhook envelope."""
-    return {
-        "entry": [
-            {"changes": [{"value": {"messages": [{"type": "text", "text": {"body": body}}]}}]}
-        ]
-    }
 
 
 # --- verify_webhook (pure) ---
@@ -71,7 +63,7 @@ def test_webhook_post_appends_row_from_whatsapp_text(monkeypatch: pytest.MonkeyP
     rows: list[list[str]] = []
     monkeypatch.setattr("src.main.append_row", lambda row: rows.append(row))
 
-    _, status = webhook(FakeRequest("POST", json=_text_envelope("Cash sale, $200")))  # type: ignore[arg-type]
+    _, status = webhook(FakeRequest("POST", json=text_message_envelope("Cash sale, $200")))  # type: ignore[arg-type]
 
     assert status == 200
     assert len(rows) == 1

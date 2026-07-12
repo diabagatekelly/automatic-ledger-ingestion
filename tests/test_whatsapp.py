@@ -1,38 +1,9 @@
 from src.whatsapp import extract_message_texts
-
-
-def _text_message_payload(body: str) -> dict:
-    """A minimal WhatsApp Cloud API inbound text-message webhook envelope."""
-    return {
-        "object": "whatsapp_business_account",
-        "entry": [
-            {
-                "id": "WABA_ID",
-                "changes": [
-                    {
-                        "field": "messages",
-                        "value": {
-                            "messaging_product": "whatsapp",
-                            "metadata": {"phone_number_id": "123"},
-                            "messages": [
-                                {
-                                    "from": "15551234567",
-                                    "id": "wamid.ABC",
-                                    "timestamp": "1710000000",
-                                    "type": "text",
-                                    "text": {"body": body},
-                                }
-                            ],
-                        },
-                    }
-                ],
-            }
-        ],
-    }
+from tests.factories import text_message_envelope
 
 
 def test_extract_returns_text_body_of_a_text_message() -> None:
-    assert extract_message_texts(_text_message_payload("Cash sale, $200")) == ["Cash sale, $200"]
+    assert extract_message_texts(text_message_envelope("Cash sale, $200")) == ["Cash sale, $200"]
 
 
 def test_extract_ignores_status_callbacks() -> None:
@@ -55,7 +26,7 @@ def test_extract_ignores_status_callbacks() -> None:
 
 
 def test_extract_ignores_non_text_messages() -> None:
-    image_payload = _text_message_payload("ignored")
+    image_payload = text_message_envelope("ignored")
     message = image_payload["entry"][0]["changes"][0]["value"]["messages"][0]
     message["type"] = "image"
     del message["text"]
@@ -91,4 +62,22 @@ def test_extract_tolerates_empty_or_malformed_payload() -> None:
 
 
 def test_extract_skips_text_message_with_empty_body() -> None:
-    assert extract_message_texts(_text_message_payload("")) == []
+    assert extract_message_texts(text_message_envelope("")) == []
+
+
+def test_extract_tolerates_off_spec_container_types() -> None:
+    # Keys present but the wrong shape (None, dict-instead-of-list, etc.)
+    # must yield [] rather than raising a TypeError.
+    assert extract_message_texts(None) == []  # type: ignore[arg-type]
+    assert extract_message_texts({"entry": None}) == []
+    assert extract_message_texts({"entry": {"changes": []}}) == []
+    assert extract_message_texts({"entry": [None]}) == []
+    assert extract_message_texts({"entry": [{"changes": None}]}) == []
+    assert extract_message_texts({"entry": [{"changes": [{"value": None}]}]}) == []
+    assert extract_message_texts({"entry": [{"changes": [{"value": {"messages": {}}}]}]}) == []
+    assert (
+        extract_message_texts(
+            {"entry": [{"changes": [{"value": {"messages": [{"type": "text", "text": None}]}}]}]}
+        )
+        == []
+    )
