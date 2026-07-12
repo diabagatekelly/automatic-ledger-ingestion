@@ -76,7 +76,13 @@ jobs:
           # (verify_webhook returns "forbidden" when the mode/token don't match).
           # This proves the function is live and running our code without
           # exposing the verify token to CI. The real 200 handshake is checked
-          # in close-out with the owner's token.
-          code=$(curl -s -o /dev/null -w '%{http_code}' "$URL")
+          # in close-out with the owner's token. If verify_webhook's tokenless
+          # response ever changes, update the expected code below.
+          # --max-time caps each attempt; --retry rides out Gen2 cold start.
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            --max-time 20 --retry 5 --retry-delay 5 --retry-connrefused "$URL" || true)
           echo "Tokenless GET -> HTTP $code"
-          test "$code" = "403"
+          if [ "$code" != "403" ]; then
+            echo "::error::expected 403 from tokenless GET, got '$code'"
+            exit 1
+          fi

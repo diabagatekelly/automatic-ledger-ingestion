@@ -59,12 +59,16 @@ gcloud iam service-accounts describe "$DEPLOYER_SA_EMAIL" --project "$PROJECT_ID
        --display-name="GitHub Actions deployer (catering-ledger)"
 
 echo "-- granting deployer roles (least privilege for a Gen2 deploy)"
+# storage.objectAdmin (not storage.admin): the deployer only needs to read/write
+# source objects in the Gen2 upload bucket, not manage bucket IAM/config. If a
+# brand-new project's very first deploy fails creating the source bucket,
+# temporarily grant roles/storage.admin for that one run, then revoke.
 for role in \
   roles/run.admin \
   roles/cloudfunctions.developer \
   roles/artifactregistry.writer \
   roles/cloudbuild.builds.editor \
-  roles/storage.admin ; do
+  roles/storage.objectAdmin ; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${DEPLOYER_SA_EMAIL}" --role="$role" \
     --condition=None >/dev/null
