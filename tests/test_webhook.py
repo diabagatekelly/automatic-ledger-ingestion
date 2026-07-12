@@ -1,6 +1,7 @@
 import pytest
 
 from src.main import verify_webhook, webhook
+from tests.factories import text_message_envelope
 
 
 class FakeRequest:
@@ -10,14 +11,14 @@ class FakeRequest:
         self,
         method: str,
         args: dict[str, str] | None = None,
-        data: str = "",
+        json: object = None,
     ) -> None:
         self.method = method
         self.args = args or {}
-        self._data = data
+        self._json = json
 
-    def get_data(self, as_text: bool = False) -> str:
-        return self._data
+    def get_json(self, silent: bool = False) -> object:
+        return self._json
 
 
 # --- verify_webhook (pure) ---
@@ -58,15 +59,41 @@ def test_webhook_get_completes_verification(monkeypatch: pytest.MonkeyPatch) -> 
     assert body == "99"
 
 
-def test_webhook_post_appends_row_and_acks(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, list[str]] = {}
-    monkeypatch.setattr("src.main.append_row", lambda row: captured.__setitem__("row", row))
+def test_webhook_post_appends_row_from_whatsapp_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows: list[list[str]] = []
+    monkeypatch.setattr("src.main.append_row", lambda row: rows.append(row))
 
-    _, status = webhook(FakeRequest("POST", data="Cash sale, $200"))  # type: ignore[arg-type]
+    _, status = webhook(FakeRequest("POST", json=text_message_envelope("Cash sale, $200")))  # type: ignore[arg-type]
 
     assert status == 200
-    assert captured["row"][0]  # Date column populated
-    assert captured["row"][5] == "Cash sale, $200"  # Source/Notes column
+    assert len(rows) == 1
+    assert rows[0][0]  # Date column populated
+    assert rows[0][5] == "Cash sale, $200"  # Source/Notes column
+
+
+def test_webhook_post_acks_status_callback_without_appending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows: list[list[str]] = []
+    monkeypatch.setattr("src.main.append_row", lambda row: rows.append(row))
+
+    status_envelope = {"entry": [{"changes": [{"value": {"statuses": [{"status": "sent"}]}}]}]}
+    _, status = webhook(FakeRequest("POST", json=status_envelope))  # type: ignore[arg-type]
+
+    assert status == 200
+    assert rows == []
+
+
+def test_webhook_post_acks_empty_body_without_appending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows: list[list[str]] = []
+    monkeypatch.setattr("src.main.append_row", lambda row: rows.append(row))
+
+    _, status = webhook(FakeRequest("POST", json=None))  # type: ignore[arg-type]
+
+    assert status == 200
+    assert rows == []
 
 
 def test_webhook_rejects_other_methods() -> None:

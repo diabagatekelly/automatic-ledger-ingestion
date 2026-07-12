@@ -2,9 +2,10 @@
 
 This is the walking skeleton (see Issues #1-#2). It currently:
   - answers the WhatsApp webhook verification handshake (GET)
-  - accepts inbound message webhooks (POST) and ACKs them
+  - parses inbound message webhooks (POST), appends a Sheet row per text
+    message, and ACKs status/non-text callbacks without a row
 
-Gemini parsing and Google Sheets persistence are added in later slices.
+Gemini parsing of the text into structured columns is added in later slices.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import functions_framework
 from flask import Request
 
 from src.sheets import append_row, build_row
+from src.whatsapp import extract_message_texts
 
 
 def verify_webhook(
@@ -46,10 +48,13 @@ def webhook(request: Request) -> tuple[str, int]:
         )
 
     if request.method == "POST":
+        # Meta delivers inbound messages and status callbacks as JSON. Extract
+        # any text bodies and append a row each; status/non-text callbacks yield
+        # none and are simply ACKed (Meta retries on any non-200).
         # TODO(#4): parse text/image/voice via Gemini into structured columns.
-        # For now the raw payload lands in Source/Notes with today's date.
-        text = request.get_data(as_text=True)
-        append_row(build_row(text, date.today()))
+        payload = request.get_json(silent=True) or {}
+        for text in extract_message_texts(payload):
+            append_row(build_row(text, date.today()))
         return ("", 200)
 
     return ("method not allowed", 405)
