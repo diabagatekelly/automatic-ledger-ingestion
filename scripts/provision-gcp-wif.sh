@@ -32,9 +32,33 @@ RUNTIME_SA_EMAIL="${RUNTIME_SA_EMAIL:-ledger-writer@${PROJECT_ID}.iam.gserviceac
 SET_GH_SECRETS=0
 [ "${1:-}" = "--set-gh-secrets" ] && SET_GH_SECRETS=1
 
+# Read a value from .env robustly: last matching line wins; strip the trailing
+# CR that Windows editors leave (CRLF) and one layer of surrounding quotes.
+# (Plain grep|cut would leak a \r into the secret value on Windows.)
+read_env_var() {
+  [ -f .env ] || return 0
+  local line
+  line="$(grep -E "^$1=" .env | tail -n1)" || return 0
+  line="${line#*=}"
+  line="${line%$'\r'}"
+  case "$line" in
+    \"*\") line="${line#\"}"; line="${line%\"}" ;;
+    \'*\') line="${line#\'}"; line="${line%\'}" ;;
+  esac
+  printf '%s' "$line"
+}
+
 if [ -z "$PROJECT_ID" ]; then
   echo "ERROR: no project set. Run: gcloud config set project <id>" >&2
   exit 1
+fi
+
+# Fail fast if --set-gh-secrets is requested but gh isn't usable.
+if [ "$SET_GH_SECRETS" = "1" ]; then
+  command -v gh >/dev/null 2>&1 \
+    || { echo "ERROR: --set-gh-secrets needs the gh CLI, which was not found." >&2; exit 1; }
+  gh auth status >/dev/null 2>&1 \
+    || { echo "ERROR: gh is not authenticated. Run: gh auth login" >&2; exit 1; }
 fi
 
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
@@ -43,6 +67,14 @@ DEPLOYER_SA_EMAIL="${DEPLOYER_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 BUILD_SA_EMAIL="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 
 echo "== Project: $PROJECT_ID ($PROJECT_NUMBER) | repo: $GITHUB_REPO =="
+
+# Fail fast: the runtime SA must already exist (created in Issue #1) and be
+# Editor on the Sheet. Catch a typo'd name / wrong project before mutating IAM.
+if ! gcloud iam service-accounts describe "$RUNTIME_SA_EMAIL" --project="$PROJECT_ID" >/dev/null 2>&1; then
+  echo "ERROR: runtime SA '$RUNTIME_SA_EMAIL' not found in project '$PROJECT_ID'." >&2
+  echo "       Re-run with RUNTIME_SA_EMAIL=<your Sheet-editor SA email> set." >&2
+  exit 1
+fi
 
 # ---- 1. enable APIs ---------------------------------------------------------
 echo "-- enabling APIs"
@@ -120,18 +152,32 @@ gcloud iam service-accounts add-iam-policy-binding "$DEPLOYER_SA_EMAIL" \
   --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/attribute.repository/${GITHUB_REPO}" >/dev/null
 
 # ---- 4. runtime secret in Secret Manager -----------------------------------
-if [ -z "${WHATSAPP_VERIFY_TOKEN:-}" ] && [ -f .env ]; then
-  WHATSAPP_VERIFY_TOKEN="$(grep -E '^WHATSAPP_VERIFY_TOKEN=' .env | cut -d= -f2- || true)"
+if [ -z "${WHATSAPP_VERIFY_TOKEN:-}" ]; then
+  WHATSAPP_VERIFY_TOKEN="$(read_env_var WHATSAPP_VERIFY_TOKEN)"
 fi
 if [ -z "${WHATSAPP_VERIFY_TOKEN:-}" ]; then
   read -rsp "WhatsApp verify token (stored in Secret Manager): " WHATSAPP_VERIFY_TOKEN; echo
+fi
+if [ -z "${WHATSAPP_VERIFY_TOKEN:-}" ]; then
+  echo "ERROR: WHATSAPP_VERIFY_TOKEN is empty — refusing to store an unusable secret." >&2
+  exit 1
 fi
 
 echo "-- Secret Manager: whatsapp-verify-token"
 gcloud secrets describe whatsapp-verify-token --project="$PROJECT_ID" >/dev/null 2>&1 \
   || gcloud secrets create whatsapp-verify-token --project="$PROJECT_ID" --replication-policy=automatic
-printf '%s' "$WHATSAPP_VERIFY_TOKEN" \
-  | gcloud secrets versions add whatsapp-verify-token --project="$PROJECT_ID" --data-file=-
+
+# Only add a new version when the value actually changed, so re-runs don't
+# clutter version history. `access latest` fails on a brand-new secret (no
+# versions yet) -> CURRENT stays empty -> treated as changed.
+CURRENT="$(gcloud secrets versions access latest \
+  --secret=whatsapp-verify-token --project="$PROJECT_ID" 2>/dev/null || true)"
+if [ "$WHATSAPP_VERIFY_TOKEN" = "$CURRENT" ]; then
+  echo "   value unchanged — skipping new version"
+else
+  printf '%s' "$WHATSAPP_VERIFY_TOKEN" \
+    | gcloud secrets versions add whatsapp-verify-token --project="$PROJECT_ID" --data-file=-
+fi
 
 echo "-- granting runtime SA read access to the secret"
 gcloud secrets add-iam-policy-binding whatsapp-verify-token --project="$PROJECT_ID" \
@@ -141,9 +187,7 @@ gcloud secrets add-iam-policy-binding whatsapp-verify-token --project="$PROJECT_
 # ---- 5. output the repo secrets --------------------------------------------
 WIF_PROVIDER="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/providers/${PROVIDER_ID}"
 SHEET_ID_VALUE="${SHEET_ID:-}"
-if [ -z "$SHEET_ID_VALUE" ] && [ -f .env ]; then
-  SHEET_ID_VALUE="$(grep -E '^SHEET_ID=' .env | cut -d= -f2- || true)"
-fi
+[ -z "$SHEET_ID_VALUE" ] && SHEET_ID_VALUE="$(read_env_var SHEET_ID)"
 
 cat <<EOF
 
