@@ -22,7 +22,7 @@ WhatsApp Cloud API · Google Sheets · GitHub Actions (CI + keyless CD via WIF).
 - `tests/` — pytest; keep coverage ≥ 70% (currently 100%).
 - `docs/ARCHITECTURE.md` — **the LLM JSON schema + Sheet layout every slice reuses.**
 - `docs/STATUS.md` — live progress/handoff log.
-- `.github/workflows/` — `ci.yml` (gate), `deploy.yml` (keyless deploy, manual until Issue #3).
+- `.github/workflows/` — `ci.yml` (gate), `deploy.yml` (keyless deploy via WIF, auto on push to `main`).
 
 ## Working conventions
 - **Thin vertical slices.** Each issue is demoable end-to-end. Don't build horizontal layers.

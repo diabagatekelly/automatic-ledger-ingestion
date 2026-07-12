@@ -1,41 +1,82 @@
 name: Deploy
 
-# Continuous deployment to Cloud Functions (Gen2) with KEYLESS auth via
-# Workload Identity Federation — no service-account JSON is ever stored.
+# Continuous deployment to Cloud Functions (Gen2 / Cloud Run functions) using
+# KEYLESS auth via Workload Identity Federation — no service-account JSON is
+# ever stored. Fires on every push to main (main is protected: code only lands
+# here through a PR whose `quality` check already passed).
 #
-# Trigger is manual (workflow_dispatch) until WIF is provisioned on GCP and
-# these repo secrets exist:
-#   GCP_WIF_PROVIDER  - full resource name of the workload identity provider
-#   GCP_DEPLOY_SA     - deployer service-account email
-# Once configured, switch the trigger to:  push -> branches: [main]
-on:
-  workflow_dispatch:
+# Required repo secrets (Settings -> Secrets and variables -> Actions):
+#   GCP_WIF_PROVIDER  full resource name of the WIF provider:
+#                     projects/<NUM>/locations/global/workloadIdentityPools/<pool>/providers/<prov>
+#   GCP_DEPLOY_SA     deployer service-account email (holds the deploy roles)
+#   GCP_PROJECT       GCP project id
+#   GCP_RUNTIME_SA    the function's runtime SA — MUST be Editor on the Sheet
+#   SHEET_ID          target spreadsheet id
+# Runtime secret in Secret Manager (NOT a repo secret), mounted as env var:
+#   whatsapp-verify-token -> WHATSAPP_VERIFY_TOKEN
+# All of the above are provisioned by scripts/provision-gcp-wif.sh.
 
+on:
+  push:
+    branches: [main]
+
+# Least privilege: read the repo + mint an OIDC token for keyless GCP auth.
 permissions:
   contents: read
-  id-token: write # required for keyless auth via WIF
+  id-token: write
+
+env:
+  REGION: us-central1
+  FUNCTION: catering-ledger-webhook
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden the runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - id: auth
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_DEPLOY_SA }}
 
-      - uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
       - name: Deploy Cloud Function (Gen2)
         run: |
-          gcloud functions deploy catering-ledger-webhook \
+          gcloud functions deploy "$FUNCTION" \
+            --project="${{ secrets.GCP_PROJECT }}" \
             --gen2 \
+            --region="$REGION" \
             --runtime=python312 \
-            --region=us-central1 \
             --source=. \
             --entry-point=webhook \
             --trigger-http \
-            --allow-unauthenticated
+            --allow-unauthenticated \
+            --service-account="${{ secrets.GCP_RUNTIME_SA }}" \
+            --set-env-vars=SHEET_ID="${{ secrets.SHEET_ID }}" \
+            --set-secrets=WHATSAPP_VERIFY_TOKEN=whatsapp-verify-token:latest
+
+      - name: Smoke test — deployed handler answers
+        run: |
+          URL=$(gcloud functions describe "$FUNCTION" \
+            --project="${{ secrets.GCP_PROJECT }}" \
+            --gen2 --region="$REGION" \
+            --format='value(serviceConfig.uri)')
+          echo "Deployed URL: $URL"
+          # A tokenless GET must reach OUR handler and be rejected with 403
+          # (verify_webhook returns "forbidden" when the mode/token don't match).
+          # This proves the function is live and running our code without
+          # exposing the verify token to CI. The real 200 handshake is checked
+          # in close-out with the owner's token.
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$URL")
+          echo "Tokenless GET -> HTTP $code"
+          test "$code" = "403"
