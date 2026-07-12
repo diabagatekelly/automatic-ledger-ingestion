@@ -10,7 +10,11 @@ name: Dependabot auto-merge
 # Ordering: because `main` is strict, merging one PR puts the rest "behind";
 # Dependabot rebases them one at a time, so the queue drains roughly oldest-first.
 
-on: pull_request
+# Only the events that (re-)open a PR or push new commits to it — not label,
+# comment, or review churn — need to (re-)enable auto-merge.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
 
 # Least privilege: only what enabling auto-merge on the PR needs. Dependabot
 # `pull_request` runs get a read-only token unless the workflow grants more, and
@@ -22,13 +26,19 @@ permissions:
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    # Act only on Dependabot's own PRs — never on human contributors'.
-    if: ${{ github.actor == 'dependabot[bot]' }}
+    # Act only on Dependabot's own PRs targeting `main` — never human
+    # contributors' PRs, never other base branches.
+    if: ${{ github.actor == 'dependabot[bot]' && github.event.pull_request.base.ref == 'main' }}
     steps:
       - name: Harden the runner
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
-          egress-policy: audit
+          # This job only ever talks to GitHub, so block all other egress.
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            codeload.github.com:443
 
       - name: Fetch Dependabot metadata
         id: meta
