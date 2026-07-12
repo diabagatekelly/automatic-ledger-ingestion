@@ -48,6 +48,22 @@ read_env_var() {
   printf '%s' "$line"
 }
 
+# Retry a command through GCP eventual consistency — e.g. a just-created service
+# account not yet visible to the IAM policy backend ("... does not exist" right
+# after create). Progress goes to stderr so callers can still redirect stdout.
+retry() {
+  local n=0 max=6 delay=5
+  until "$@"; do
+    n=$((n + 1))
+    if [ "$n" -ge "$max" ]; then
+      echo "ERROR: still failing after $max attempts: $*" >&2
+      return 1
+    fi
+    echo "   transient error — retry $n/$max in ${delay}s..." >&2
+    sleep "$delay"
+  done
+}
+
 if [ -z "$PROJECT_ID" ]; then
   echo "ERROR: no project set. Run: gcloud config set project <id>" >&2
   exit 1
@@ -90,6 +106,8 @@ gcloud iam service-accounts describe "$DEPLOYER_SA_EMAIL" --project "$PROJECT_ID
   || gcloud iam service-accounts create "$DEPLOYER_SA_NAME" --project "$PROJECT_ID" \
        --display-name="GitHub Actions deployer (catering-ledger)"
 
+# A freshly created SA is eventually consistent; the IAM bindings below are
+# wrapped in retry() to ride out the propagation lag.
 echo "-- granting deployer roles (least privilege for a Gen2 deploy)"
 # storage.objectAdmin (not storage.admin): the deployer only needs to read/write
 # source objects in the Gen2 upload bucket, not manage bucket IAM/config. If a
@@ -101,7 +119,7 @@ for role in \
   roles/artifactregistry.writer \
   roles/cloudbuild.builds.editor \
   roles/storage.objectAdmin ; do
-  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  retry gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${DEPLOYER_SA_EMAIL}" --role="$role" \
     --condition=None >/dev/null
 done
@@ -110,7 +128,7 @@ done
 # identity) and AS the build SA (to run the Cloud Build). Scoped to those SAs.
 echo "-- scoping serviceAccountUser to runtime + build SAs"
 for target in "$RUNTIME_SA_EMAIL" "$BUILD_SA_EMAIL"; do
-  gcloud iam service-accounts add-iam-policy-binding "$target" \
+  retry gcloud iam service-accounts add-iam-policy-binding "$target" \
     --project="$PROJECT_ID" \
     --member="serviceAccount:${DEPLOYER_SA_EMAIL}" \
     --role="roles/iam.serviceAccountUser" >/dev/null
@@ -122,7 +140,7 @@ for role in \
   roles/cloudbuild.builds.builder \
   roles/artifactregistry.writer \
   roles/logging.logWriter ; do
-  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  retry gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${BUILD_SA_EMAIL}" --role="$role" \
     --condition=None >/dev/null
 done
@@ -146,7 +164,7 @@ gcloud iam workload-identity-pools providers describe "$PROVIDER_ID" \
        --attribute-condition="assertion.repository=='${GITHUB_REPO}'"
 
 echo "-- binding deployer SA to the repo's federated identity"
-gcloud iam service-accounts add-iam-policy-binding "$DEPLOYER_SA_EMAIL" \
+retry gcloud iam service-accounts add-iam-policy-binding "$DEPLOYER_SA_EMAIL" \
   --project="$PROJECT_ID" \
   --role="roles/iam.workloadIdentityUser" \
   --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/attribute.repository/${GITHUB_REPO}" >/dev/null
@@ -180,7 +198,7 @@ else
 fi
 
 echo "-- granting runtime SA read access to the secret"
-gcloud secrets add-iam-policy-binding whatsapp-verify-token --project="$PROJECT_ID" \
+retry gcloud secrets add-iam-policy-binding whatsapp-verify-token --project="$PROJECT_ID" \
   --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
   --role="roles/secretmanager.secretAccessor" >/dev/null
 
