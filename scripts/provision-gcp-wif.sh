@@ -93,8 +93,12 @@ if ! gcloud iam service-accounts describe "$RUNTIME_SA_EMAIL" --project="$PROJEC
 fi
 
 # ---- 1. enable APIs ---------------------------------------------------------
+# cloudresourcemanager + serviceusage are needed by `gcloud functions deploy`
+# itself (the deployer SA resolves the project through them); the rest are the
+# Gen2 build/runtime surface.
 echo "-- enabling APIs"
 gcloud services enable \
+  cloudresourcemanager.googleapis.com serviceusage.googleapis.com \
   cloudfunctions.googleapis.com run.googleapis.com cloudbuild.googleapis.com \
   artifactregistry.googleapis.com secretmanager.googleapis.com \
   iamcredentials.googleapis.com iam.googleapis.com sts.googleapis.com \
