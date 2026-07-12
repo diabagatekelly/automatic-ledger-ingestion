@@ -1,0 +1,36 @@
+# Files NOT uploaded to Cloud Functions on deploy.
+#
+# NOTE: the presence of this file makes gcloud IGNORE .gitignore, so every
+# exclusion must be listed here explicitly. The runtime needs only main.py,
+# requirements.txt, and src/ — keep those shipped.
+
+.git/
+.github/
+.claude/
+
+# Local virtualenv + tool caches
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+.coverage
+
+# Tests, docs, dev tooling — not needed at runtime
+tests/
+docs/
+scripts/
+requirements-dev.txt
+pyproject.toml
+
+# Never ship local secrets (also gitignored, but be explicit)
+.env
+.env.example
+service-account.json
+
+# Repo metadata
+*.md
+LICENSE
+.gitattributes
+.gitignore
