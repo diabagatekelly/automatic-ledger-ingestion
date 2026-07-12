@@ -1,4 +1,4 @@
-functions-framework>=3.5,<4
+functions-framework>=3.10.2,<4
 google-genai>=1.0.0
 google-api-python-client>=2.198.0
 google-auth>=2.55.2
