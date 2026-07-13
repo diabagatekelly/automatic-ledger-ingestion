@@ -16,7 +16,7 @@ database, the owner's UI, and the auditor's dashboard.
  WhatsApp (photo / text / voice)
         │  inbound webhook
         ▼
- Cloud Function (Gen2, Python)  ──►  Gemini 2.5 Flash  (parse → structured JSON)
+ Cloud Function (Gen2, Python)  ──►  Gemini Flash  (parse → structured JSON)
         │                                   │
         │  append row                       │  confirmation reply (free, in 24h window)
         ▼                                   ▼
@@ -30,7 +30,7 @@ database, the owner's UI, and the auditor's dashboard.
 |--------------|------------------------------------------|-----|
 | Compute      | GCP Cloud Functions (Gen2)               | Real serverless skills, low maintenance, generous free tier |
 | Language     | Python 3.12                              | Terse for Google APIs + Gemini |
-| Parsing      | Gemini 2.5 Flash (multimodal)            | Free tier covers image + text + audio; ~250 req/day free |
+| Parsing      | Gemini Flash (`gemini-flash-latest`)     | Free tier covers image + text + audio; ~250 req/day free |
 | Ingestion    | WhatsApp Cloud API                       | Owner already uses it; inbound + service replies are free |
 | Storage / UI | Google Sheets                            | Free; single source of truth *and* the owner-facing UI |
 | CI / CD      | GitHub Actions (keyless deploy via WIF)  | No stored service-account keys; native to the repo |

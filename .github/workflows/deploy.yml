@@ -12,8 +12,9 @@ name: Deploy
 #   GCP_PROJECT       GCP project id
 #   GCP_RUNTIME_SA    the function's runtime SA — MUST be Editor on the Sheet
 #   SHEET_ID          target spreadsheet id
-# Runtime secret in Secret Manager (NOT a repo secret), mounted as env var:
+# Runtime secrets in Secret Manager (NOT repo secrets), mounted as env vars:
 #   whatsapp-verify-token -> WHATSAPP_VERIFY_TOKEN
+#   gemini-api-key        -> GEMINI_API_KEY
 # All of the above are provisioned by scripts/provision-gcp-wif.sh.
 
 on:
@@ -62,8 +63,8 @@ jobs:
             --trigger-http \
             --allow-unauthenticated \
             --service-account="${{ secrets.GCP_RUNTIME_SA }}" \
-            --set-env-vars=SHEET_ID="${{ secrets.SHEET_ID }}" \
-            --set-secrets=WHATSAPP_VERIFY_TOKEN=whatsapp-verify-token:latest
+            --set-env-vars=SHEET_ID="${{ secrets.SHEET_ID }}",GEMINI_MODEL=gemini-flash-latest \
+            --set-secrets=WHATSAPP_VERIFY_TOKEN=whatsapp-verify-token:latest,GEMINI_API_KEY=gemini-api-key:latest
 
       - name: Smoke test — deployed handler answers
         run: |

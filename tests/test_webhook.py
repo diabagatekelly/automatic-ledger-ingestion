@@ -59,16 +59,43 @@ def test_webhook_get_completes_verification(monkeypatch: pytest.MonkeyPatch) -> 
     assert body == "99"
 
 
-def test_webhook_post_appends_row_from_whatsapp_text(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_webhook_post_appends_parsed_row_from_whatsapp_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.llm import ParsedNote
+
     rows: list[list[str]] = []
     monkeypatch.setattr("src.main.append_row", lambda row: rows.append(row))
+    parsed = ParsedNote(
+        date="2026-07-13",
+        contract_name="Wedding Cake",
+        category="Revenue",
+        type="Revenue",
+        amount="200",
+        notes="Cash sale",
+        confidence="high",
+    )
+    monkeypatch.setattr("src.main.parse_note", lambda text, today: parsed)
+
+    _, status = webhook(FakeRequest("POST", json=text_message_envelope("Cash sale, $200")))  # type: ignore[arg-type]
+
+    assert status == 200
+    assert rows == [["2026-07-13", "Wedding Cake", "Revenue", "Revenue", "200", "Cash sale"]]
+
+
+def test_webhook_post_falls_back_to_raw_text_row_when_parse_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows: list[list[str]] = []
+    monkeypatch.setattr("src.main.append_row", lambda row: rows.append(row))
+    monkeypatch.setattr("src.main.parse_note", lambda text, today: None)
 
     _, status = webhook(FakeRequest("POST", json=text_message_envelope("Cash sale, $200")))  # type: ignore[arg-type]
 
     assert status == 200
     assert len(rows) == 1
     assert rows[0][0]  # Date column populated
-    assert rows[0][5] == "Cash sale, $200"  # Source/Notes column
+    assert rows[0][5] == "Cash sale, $200"  # raw text preserved in Source/Notes
 
 
 def test_webhook_post_acks_status_callback_without_appending(

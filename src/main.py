@@ -16,7 +16,8 @@ from datetime import date
 import functions_framework
 from flask import Request
 
-from src.sheets import append_row, build_row
+from src.llm import parse_note
+from src.sheets import append_row, build_row, build_row_from_note
 from src.whatsapp import extract_message_texts
 
 
@@ -51,10 +52,15 @@ def webhook(request: Request) -> tuple[str, int]:
         # Meta delivers inbound messages and status callbacks as JSON. Extract
         # any text bodies and append a row each; status/non-text callbacks yield
         # none and are simply ACKed (Meta retries on any non-200).
-        # TODO(#4): parse text/image/voice via Gemini into structured columns.
+        # Each text is parsed by Gemini into structured columns (#4); if the
+        # parse fails we fall back to the raw text in Notes (#1) so nothing is
+        # ever lost. TODO(#5): image/voice; TODO(#9): flag low-confidence rows.
         payload = request.get_json(silent=True) or {}
+        today = date.today()
         for text in extract_message_texts(payload):
-            append_row(build_row(text, date.today()))
+            note = parse_note(text, today)
+            row = build_row_from_note(note) if note is not None else build_row(text, today)
+            append_row(row)
         return ("", 200)
 
     return ("method not allowed", 405)

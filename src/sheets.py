@@ -14,6 +14,8 @@ from typing import Any
 import google.auth
 from googleapiclient.discovery import build as discovery_build
 
+from src.llm import ParsedNote
+
 _SHEET_RANGE = "All Transactions!A:F"
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _FORMULA_TRIGGERS = ("=", "+", "-", "@")
@@ -38,6 +40,23 @@ def build_row(text: str, today: date) -> list[str]:
     For this slice only Date and Source/Notes are populated.
     """
     return [today.isoformat(), "", "", "", "", _defuse_formula(text)]
+
+
+def build_row_from_note(note: ParsedNote) -> list[str]:
+    """Build a 6-column ledger row from a Gemini-parsed note.
+
+    Columns: Date | Contract Name | Category | Type | Amount | Source/Notes.
+    Text fields are defused against formula injection (the LLM echoes owner
+    input, so its output is untrusted for spreadsheet purposes).
+    """
+    return [
+        _defuse_formula(note.date),
+        _defuse_formula(note.contract_name),
+        _defuse_formula(note.category),
+        _defuse_formula(note.type),
+        _defuse_formula(note.amount),
+        _defuse_formula(note.notes),
+    ]
 
 
 def _build_service() -> Any:

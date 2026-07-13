@@ -1,9 +1,11 @@
+import dataclasses
 from datetime import date
 from unittest.mock import MagicMock
 
 import pytest
 
-from src.sheets import append_row, build_row
+from src.llm import ParsedNote
+from src.sheets import append_row, build_row, build_row_from_note
 
 # --- build_row (pure) ---
 
@@ -16,6 +18,54 @@ def test_build_row_places_date_and_notes_leaving_middle_blank() -> None:
 def test_build_row_defuses_leading_formula_in_notes() -> None:
     row = build_row("=IMPORTXML(evil)", date(2026, 7, 11))
     assert row[5] == "'=IMPORTXML(evil)"
+
+
+# --- build_row_from_note (pure) ---
+
+
+def test_build_row_from_note_maps_every_column() -> None:
+    note = ParsedNote(
+        date="2026-07-13",
+        contract_name="Wedding Cake",
+        category="Revenue",
+        type="Revenue",
+        amount="200",
+        notes="Cash sale",
+        confidence="high",
+    )
+    assert build_row_from_note(note) == [
+        "2026-07-13",
+        "Wedding Cake",
+        "Revenue",
+        "Revenue",
+        "200",
+        "Cash sale",
+    ]
+
+
+# Column order maps each ParsedNote field to its index in the appended row.
+_FIELD_INDEX = {"date": 0, "contract_name": 1, "category": 2, "type": 3, "amount": 4, "notes": 5}
+_BASE_NOTE = ParsedNote(
+    date="2026-07-13",
+    contract_name="Wedding Cake",
+    category="Revenue",
+    type="Revenue",
+    amount="200",
+    notes="Cash sale",
+    confidence="high",
+)
+
+
+@pytest.mark.parametrize("field", list(_FIELD_INDEX))
+@pytest.mark.parametrize("trigger", ["=", "+", "-", "@"])
+def test_build_row_from_note_defuses_every_trigger_in_every_text_cell(
+    field: str, trigger: str
+) -> None:
+    # Every cell is text in the sheet, so a leading formula trigger in ANY
+    # column (including Amount, e.g. "=1+2") must be prefixed with an apostrophe.
+    value = f"{trigger}1+2" if field == "amount" else f"{trigger}evil"
+    row = build_row_from_note(dataclasses.replace(_BASE_NOTE, **{field: value}))
+    assert row[_FIELD_INDEX[field]] == f"'{value}"
 
 
 # --- append_row (Sheets adapter, mocked client) ---
