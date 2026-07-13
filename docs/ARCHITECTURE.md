@@ -6,9 +6,10 @@
 2. **Webhook** — Meta POSTs the message to the Cloud Function.
 3. **Fetch media** — for photo/voice, the function downloads the media by ID
    using the WhatsApp access token.
-4. **Parse** — Gemini 2.5 Flash converts the unstructured input into structured
-   JSON against the fixed schema below. On low confidence, the row is flagged
-   `NEEDS_REVIEW` rather than guessed.
+4. **Parse** — Gemini Flash (free tier; model `gemini-flash-latest`, an alias
+   that tracks the current version so a retired pin can't break us) converts the
+   unstructured input into structured JSON against the fixed schema below. On low
+   confidence, the row is flagged `NEEDS_REVIEW` rather than guessed.
 5. **Persist** — the row is appended to Tab A ("All Transactions").
 6. **Confirm** — a human-readable reply is sent back (free, inside the 24h window).
 

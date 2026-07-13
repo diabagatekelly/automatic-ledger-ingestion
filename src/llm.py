@@ -18,7 +18,11 @@ from typing import Any
 from google import genai
 from google.genai import types
 
-_DEFAULT_MODEL = "gemini-2.5-flash"
+# Alias that always resolves to the current Gemini Flash model. Pinning a
+# specific version (e.g. gemini-2.5-flash) breaks when Google retires it for
+# new users — the alias tracks the latest free-tier flash instead. Override
+# with GEMINI_MODEL to pin a version.
+_DEFAULT_MODEL = "gemini-flash-latest"
 
 # Strict system instruction. The model must return ONLY JSON matching the
 # contract; ``response_mime_type`` below also forces JSON, but stating it keeps
