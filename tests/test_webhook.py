@@ -1,6 +1,6 @@
 import pytest
 
-from src.main import verify_webhook, webhook
+from src.main import _UNREADABLE_IMAGE_NOTE, verify_webhook, webhook
 from tests.factories import image_message_envelope, text_message_envelope
 
 
@@ -164,7 +164,44 @@ def test_webhook_post_appends_marker_row_when_media_download_fails(
     assert status == 200
     assert len(rows) == 1  # a captionless, unfetchable photo is NOT silently dropped
     assert rows[0][0]  # Date populated
-    assert rows[0][5]  # a non-empty marker lands in Source/Notes
+    assert rows[0][5] == _UNREADABLE_IMAGE_NOTE  # exact marker lands in Source/Notes
+
+
+def test_webhook_post_appends_a_row_for_both_text_and_image_in_one_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.llm import ParsedNote
+
+    rows: list[list[str]] = []
+    monkeypatch.setattr("src.main.append_row", lambda row: rows.append(row))
+    monkeypatch.setattr("src.main.download_media", lambda media_id: (b"jpeg-bytes", "image/jpeg"))
+    text_note = ParsedNote("2026-07-13", "", "", "Revenue", "200", "Cash sale", "high")
+    image_note = ParsedNote("2026-07-10", "ONEP", "Revenue", "Revenue", "555000", "Invoice", "high")
+    monkeypatch.setattr("src.main.parse_note", lambda text, today: text_note)
+    monkeypatch.setattr("src.main.parse_image", lambda *a, **k: image_note)
+
+    payload = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {"type": "text", "text": {"body": "Cash sale, $200"}},
+                                {"type": "image", "image": {"id": "media-1", "caption": "Invoice"}},
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    _, status = webhook(FakeRequest("POST", json=payload))  # type: ignore[arg-type]
+
+    assert status == 200
+    assert len(rows) == 2  # one row per message, both paths run on the same webhook
+    assert rows[0][5] == "Cash sale"  # text row appended first
+    assert rows[1][1] == "ONEP"  # image row appended second
 
 
 def test_webhook_post_acks_status_callback_without_appending(

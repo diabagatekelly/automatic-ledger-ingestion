@@ -53,6 +53,23 @@ def test_download_media_returns_bytes_and_mime_type(monkeypatch: pytest.MonkeyPa
     assert mime_type == "image/png"
 
 
+def test_download_media_defaults_mime_type_when_metadata_omits_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeRequests(
+        [
+            FakeHTTPResponse(json_body={"url": "https://lookaside/media"}),  # no mime_type
+            FakeHTTPResponse(content=b"raw-bytes"),
+        ]
+    )
+    monkeypatch.setattr("src.media.requests", fake)
+
+    data, mime_type = download_media("media-1")
+
+    assert data == b"raw-bytes"
+    assert mime_type == "application/octet-stream"
+
+
 def test_download_media_hits_metadata_then_binary_url_with_bearer_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

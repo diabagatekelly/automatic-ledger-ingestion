@@ -83,12 +83,15 @@ def _row_for_image(image: InboundImage, today: date) -> list[str]:
     caption (or a marker if none) so an unreadable photo is never silently
     dropped — the owner still sees a row to correct by hand.
     """
+    note = None
     try:
         image_bytes, mime_type = download_media(image.media_id)
-        note = parse_image(image_bytes, mime_type, today, image.caption)
     except Exception:
-        logger.warning("Receipt image fetch failed; falling back to raw row", exc_info=True)
-        note = None
+        # Only the download is in the try: parse_image handles its own failures
+        # internally (returns None + logs), so the message stays accurate.
+        logger.warning("Receipt image download failed; falling back to raw row", exc_info=True)
+    else:
+        note = parse_image(image_bytes, mime_type, today, image.caption)
     if note is not None:
         return build_row_from_note(note)
     return build_row(image.caption or _UNREADABLE_IMAGE_NOTE, today)
