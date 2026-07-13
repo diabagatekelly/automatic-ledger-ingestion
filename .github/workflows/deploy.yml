@@ -21,6 +21,9 @@ name: Deploy
 on:
   push:
     branches: [main]
+  # Manual trigger — redeploy without a code change, e.g. to pick up a rotated
+  # Secret Manager version (secrets are pinned to :latest at deploy time).
+  workflow_dispatch:
 
 # Least privilege: read the repo + mint an OIDC token for keyless GCP auth.
 permissions:
@@ -63,6 +66,7 @@ jobs:
             --entry-point=webhook \
             --trigger-http \
             --allow-unauthenticated \
+            --memory=512Mi \
             --service-account="${{ secrets.GCP_RUNTIME_SA }}" \
             --set-env-vars=SHEET_ID="${{ secrets.SHEET_ID }}" \
             --set-secrets=WHATSAPP_VERIFY_TOKEN=whatsapp-verify-token:latest,WHATSAPP_ACCESS_TOKEN=whatsapp-access-token:latest,GEMINI_API_KEY=gemini-api-key:latest
