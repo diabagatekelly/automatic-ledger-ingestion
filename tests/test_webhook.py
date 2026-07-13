@@ -1,7 +1,7 @@
 import pytest
 
 from src.main import verify_webhook, webhook
-from tests.factories import text_message_envelope
+from tests.factories import image_message_envelope, text_message_envelope
 
 
 class FakeRequest:
@@ -96,6 +96,75 @@ def test_webhook_post_falls_back_to_raw_text_row_when_parse_fails(
     assert len(rows) == 1
     assert rows[0][0]  # Date column populated
     assert rows[0][5] == "Cash sale, $200"  # raw text preserved in Source/Notes
+
+
+def test_webhook_post_appends_parsed_row_from_receipt_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.llm import ParsedNote
+
+    rows: list[list[str]] = []
+    monkeypatch.setattr("src.main.append_row", lambda row: rows.append(row))
+    monkeypatch.setattr("src.main.download_media", lambda media_id: (b"jpeg-bytes", "image/jpeg"))
+    parsed = ParsedNote(
+        date="2026-07-10",
+        contract_name="",
+        category="Ingredients",
+        type="Expense",
+        amount="20000",
+        notes="Meat purchase",
+        confidence="high",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_parse_image(image_bytes: bytes, mime_type: str, today: object, caption: str) -> object:
+        captured.update(image_bytes=image_bytes, mime_type=mime_type, caption=caption)
+        return parsed
+
+    monkeypatch.setattr("src.main.parse_image", fake_parse_image)
+
+    _, status = webhook(FakeRequest("POST", json=image_message_envelope("media-1", caption="Meat")))  # type: ignore[arg-type]
+
+    assert status == 200
+    assert rows == [["2026-07-10", "", "Ingredients", "Expense", "20000", "Meat purchase"]]
+    assert captured == {"image_bytes": b"jpeg-bytes", "mime_type": "image/jpeg", "caption": "Meat"}
+
+
+def test_webhook_post_falls_back_to_caption_row_when_image_parse_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows: list[list[str]] = []
+    monkeypatch.setattr("src.main.append_row", lambda row: rows.append(row))
+    monkeypatch.setattr("src.main.download_media", lambda media_id: (b"bytes", "image/jpeg"))
+    monkeypatch.setattr("src.main.parse_image", lambda *a, **k: None)
+
+    _, status = webhook(
+        FakeRequest("POST", json=image_message_envelope("media-1", caption="Lunch receipt"))  # type: ignore[arg-type]
+    )
+
+    assert status == 200
+    assert len(rows) == 1
+    assert rows[0][0]  # Date populated
+    assert rows[0][5] == "Lunch receipt"  # caption preserved in Source/Notes
+
+
+def test_webhook_post_appends_marker_row_when_media_download_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows: list[list[str]] = []
+    monkeypatch.setattr("src.main.append_row", lambda row: rows.append(row))
+
+    def boom(media_id: str) -> object:
+        raise RuntimeError("media endpoint down")
+
+    monkeypatch.setattr("src.main.download_media", boom)
+
+    _, status = webhook(FakeRequest("POST", json=image_message_envelope("media-1")))  # type: ignore[arg-type]
+
+    assert status == 200
+    assert len(rows) == 1  # a captionless, unfetchable photo is NOT silently dropped
+    assert rows[0][0]  # Date populated
+    assert rows[0][5]  # a non-empty marker lands in Source/Notes
 
 
 def test_webhook_post_acks_status_callback_without_appending(

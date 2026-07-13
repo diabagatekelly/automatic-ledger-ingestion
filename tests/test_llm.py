@@ -3,7 +3,7 @@ from datetime import date
 
 import pytest
 
-from src.llm import ParsedNote, _build_client, coerce_note, parse_note
+from src.llm import ParsedNote, _build_client, coerce_note, parse_image, parse_note
 
 TODAY = date(2026, 7, 13)
 
@@ -185,6 +185,75 @@ def test_parse_note_returns_none_when_model_returns_non_object_json(
     # Valid JSON that isn't an object (a list) must not become a row.
     monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text="[1, 2, 3]"))
     assert parse_note("Cash sale", TODAY) is None
+
+
+# --- parse_image (multimodal Gemini adapter, mocked client) ---
+
+
+def _inline_parts(contents: object) -> list[object]:
+    """Return the parts of a multimodal ``contents`` list that carry image bytes."""
+    if not isinstance(contents, list):
+        return []
+    return [p for p in contents if getattr(p, "inline_data", None) is not None]
+
+
+def test_parse_image_returns_structured_expense_from_gemini_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = json.dumps(
+        {
+            "date": "2026-07-10",
+            "contract_name": "",
+            "category": "Ingredients",
+            "type": "Expense",
+            "amount": 20000,
+            "notes": "Meat purchase",
+            "confidence": "high",
+        }
+    )
+    client = FakeClient(text=body)
+    monkeypatch.setattr("src.llm._build_client", lambda: client)
+
+    note = parse_image(b"\x89PNG-bytes", "image/png", TODAY, caption="")
+
+    assert note is not None
+    assert note.type == "Expense"
+    assert note.amount == "20000"
+    # The image bytes + mime type must reach the model as an inline part, and
+    # the current date must be in the prompt for relative-date resolution.
+    parts = _inline_parts(client.last_kwargs.get("contents"))
+    assert len(parts) == 1
+    assert parts[0].inline_data.mime_type == "image/png"
+    assert parts[0].inline_data.data == b"\x89PNG-bytes"
+    assert TODAY.isoformat() in str(client.last_kwargs.get("contents"))
+
+
+def test_parse_image_uses_caption_as_notes_fallback_for_sparse_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text='{"amount": 5000}'))
+
+    note = parse_image(b"bytes", "image/jpeg", TODAY, caption="Taxi to venue")
+
+    assert note is not None
+    assert note.amount == "5000"
+    assert note.notes == "Taxi to venue"  # caption fills the empty notes field
+
+
+def test_parse_image_returns_none_when_model_returns_non_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text="sorry, no receipt"))
+    assert parse_image(b"bytes", "image/jpeg", TODAY, caption="") is None
+
+
+def test_parse_image_returns_none_when_model_call_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.llm._build_client", lambda: FakeClient(raises=RuntimeError("api down"))
+    )
+    assert parse_image(b"bytes", "image/jpeg", TODAY, caption="") is None
 
 
 # --- _build_client (adapter) ---

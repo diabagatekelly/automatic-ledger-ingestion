@@ -1,5 +1,5 @@
-from src.whatsapp import extract_message_texts
-from tests.factories import text_message_envelope
+from src.whatsapp import InboundImage, extract_image_messages, extract_message_texts
+from tests.factories import image_message_envelope, text_message_envelope
 
 
 def test_extract_returns_text_body_of_a_text_message() -> None:
@@ -32,6 +32,44 @@ def test_extract_ignores_non_text_messages() -> None:
     del message["text"]
     message["image"] = {"id": "media-1", "mime_type": "image/jpeg"}
     assert extract_message_texts(image_payload) == []
+
+
+# --- extract_image_messages (pure) ---
+
+
+def test_extract_images_returns_media_id_and_caption() -> None:
+    payload = image_message_envelope("media-1", caption="Lunch receipt")
+    assert extract_image_messages(payload) == [
+        InboundImage(media_id="media-1", caption="Lunch receipt")
+    ]
+
+
+def test_extract_images_defaults_caption_to_empty_string() -> None:
+    payload = image_message_envelope("media-1")
+    assert extract_image_messages(payload) == [InboundImage(media_id="media-1", caption="")]
+
+
+def test_extract_images_ignores_text_messages() -> None:
+    assert extract_image_messages(text_message_envelope("Cash sale, $200")) == []
+
+
+def test_extract_images_skips_image_without_media_id() -> None:
+    payload = image_message_envelope("ignored")
+    del payload["entry"][0]["changes"][0]["value"]["messages"][0]["image"]["id"]
+    assert extract_image_messages(payload) == []
+
+
+def test_extract_images_tolerates_off_spec_payloads() -> None:
+    assert extract_image_messages(None) == []  # type: ignore[arg-type]
+    assert extract_image_messages({}) == []
+    assert extract_image_messages({"entry": [{"changes": [{"value": None}]}]}) == []
+    assert extract_image_messages({"entry": [{"changes": [{"value": {"messages": {}}}]}]}) == []
+    assert (
+        extract_image_messages(
+            {"entry": [{"changes": [{"value": {"messages": [{"type": "image", "image": None}]}}]}]}
+        )
+        == []
+    )
 
 
 def test_extract_handles_multiple_messages_across_entries() -> None:

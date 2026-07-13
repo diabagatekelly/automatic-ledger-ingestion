@@ -10,15 +10,23 @@ Gemini parsing of the text into structured columns is added in later slices.
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import date
 
 import functions_framework
 from flask import Request
 
-from src.llm import parse_note
+from src.llm import parse_image, parse_note
+from src.media import download_media
 from src.sheets import append_row, build_row, build_row_from_note
-from src.whatsapp import extract_message_texts
+from src.whatsapp import InboundImage, extract_image_messages, extract_message_texts
+
+logger = logging.getLogger(__name__)
+
+# Fallback note for a receipt photo we received but could not read (download or
+# parse failed) and that carried no caption — so the row is never silently lost.
+_UNREADABLE_IMAGE_NOTE = "[receipt photo received — could not read it automatically]"
 
 
 def verify_webhook(
@@ -50,17 +58,37 @@ def webhook(request: Request) -> tuple[str, int]:
 
     if request.method == "POST":
         # Meta delivers inbound messages and status callbacks as JSON. Extract
-        # any text bodies and append a row each; status/non-text callbacks yield
-        # none and are simply ACKed (Meta retries on any non-200).
-        # Each text is parsed by Gemini into structured columns (#4); if the
-        # parse fails we fall back to the raw text in Notes (#1) so nothing is
-        # ever lost. TODO(#5): image/voice; TODO(#9): flag low-confidence rows.
+        # any text bodies and image references and append a row each; status /
+        # unsupported callbacks yield none and are simply ACKed (Meta retries on
+        # any non-200). Every message is parsed by Gemini into structured
+        # columns (#4 text, #5 image); on any failure we fall back to a raw-text
+        # row so nothing is ever lost. TODO(#9): flag low-confidence rows.
         payload = request.get_json(silent=True) or {}
         today = date.today()
         for text in extract_message_texts(payload):
             note = parse_note(text, today)
             row = build_row_from_note(note) if note is not None else build_row(text, today)
             append_row(row)
+        for image in extract_image_messages(payload):
+            append_row(_row_for_image(image, today))
         return ("", 200)
 
     return ("method not allowed", 405)
+
+
+def _row_for_image(image: InboundImage, today: date) -> list[str]:
+    """Download, parse, and map a receipt photo to a ledger row.
+
+    On a download or parse failure, falls back to a raw-text row carrying the
+    caption (or a marker if none) so an unreadable photo is never silently
+    dropped — the owner still sees a row to correct by hand.
+    """
+    try:
+        image_bytes, mime_type = download_media(image.media_id)
+        note = parse_image(image_bytes, mime_type, today, image.caption)
+    except Exception:
+        logger.warning("Receipt image fetch failed; falling back to raw row", exc_info=True)
+        note = None
+    if note is not None:
+        return build_row_from_note(note)
+    return build_row(image.caption or _UNREADABLE_IMAGE_NOTE, today)
