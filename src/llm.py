@@ -107,18 +107,19 @@ def _build_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
-def parse_note(text: str, today: date) -> ParsedNote | None:
-    """Parse a free-text note into structured columns via Gemini Flash.
+def _generate_note(contents: Any, raw_text: str, today: date) -> ParsedNote | None:
+    """Send ``contents`` to Gemini under the ledger contract and coerce the JSON.
 
-    Returns a ``ParsedNote`` on success, or ``None`` on any failure (missing key,
-    API error, non-JSON response) so the caller can fall back to a raw-text row.
+    Shared by the text (``parse_note``) and image (``parse_image``) adapters —
+    only the ``contents`` differ (a string vs. a prompt + inline image part).
+    Returns ``None`` on any failure so the caller can fall back to a raw row;
+    ``raw_text`` seeds ``coerce_note``'s Notes default when the model omits it.
     """
-    prompt = f"Current date: {today.isoformat()}\nNote: {text}"
     try:
         client = _build_client()
         response = client.models.generate_content(
             model=os.environ.get("GEMINI_MODEL", _DEFAULT_MODEL),
-            contents=prompt,
+            contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=_SYSTEM_INSTRUCTION,
                 response_mime_type="application/json",
@@ -134,8 +135,42 @@ def parse_note(text: str, today: date) -> ParsedNote | None:
         # Logged at WARNING (not ERROR) because falling back is expected on
         # transient throttling (free-tier 429) — exc_info keeps the cause
         # visible in Cloud Logging without alarming noise.
-        logger.warning("Gemini parse failed; falling back to raw-text row", exc_info=True)
+        logger.warning("Gemini parse failed; falling back to raw row", exc_info=True)
         return None
     if not isinstance(data, dict):
         return None
-    return coerce_note(data, raw_text=text, today=today)
+    return coerce_note(data, raw_text=raw_text, today=today)
+
+
+def parse_note(text: str, today: date) -> ParsedNote | None:
+    """Parse a free-text note into structured columns via Gemini Flash.
+
+    Returns a ``ParsedNote`` on success, or ``None`` on any failure (missing key,
+    API error, non-JSON response) so the caller can fall back to a raw-text row.
+    """
+    prompt = f"Current date: {today.isoformat()}\nNote: {text}"
+    return _generate_note(prompt, raw_text=text, today=today)
+
+
+def parse_image(
+    image_bytes: bytes, mime_type: str, today: date, caption: str = ""
+) -> ParsedNote | None:
+    """Parse a receipt photo into structured columns via multimodal Gemini.
+
+    Sends the image bytes inline alongside a text prompt, reusing the same JSON
+    contract and system instruction as the text path. ``caption`` (the owner's
+    optional photo caption) both steers the model and seeds the Notes fallback.
+    Returns ``None`` on any failure so the caller can fall back to a raw row.
+    """
+    prompt = (
+        f"Current date: {today.isoformat()}\n"
+        "The attached image is a photo of a receipt or invoice for a business "
+        "expense. Read it and extract the ledger entry."
+    )
+    if caption:
+        prompt += f"\nThe owner added this caption: {caption}"
+    contents = [
+        types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+        prompt,
+    ]
+    return _generate_note(contents, raw_text=caption, today=today)

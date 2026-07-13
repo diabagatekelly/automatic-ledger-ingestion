@@ -226,6 +226,21 @@ if [ -z "${GEMINI_API_KEY:-}" ]; then
 fi
 store_secret gemini-api-key "$GEMINI_API_KEY"
 
+# WhatsApp access token (Meta) — mounted as WHATSAPP_ACCESS_TOKEN so the function
+# can download inbound media (receipt photos, #5) from the Graph media endpoint.
+# The deploy mounts whatsapp-access-token:latest, so the secret must exist.
+if [ -z "${WHATSAPP_ACCESS_TOKEN:-}" ]; then
+  WHATSAPP_ACCESS_TOKEN="$(read_env_var WHATSAPP_ACCESS_TOKEN)"
+fi
+if [ -z "${WHATSAPP_ACCESS_TOKEN:-}" ]; then
+  read -rsp "WhatsApp access token (stored in Secret Manager): " WHATSAPP_ACCESS_TOKEN; echo
+fi
+if [ -z "${WHATSAPP_ACCESS_TOKEN:-}" ]; then
+  echo "ERROR: WHATSAPP_ACCESS_TOKEN is empty — refusing to store an unusable secret." >&2
+  exit 1
+fi
+store_secret whatsapp-access-token "$WHATSAPP_ACCESS_TOKEN"
+
 # ---- 5. output the repo secrets --------------------------------------------
 WIF_PROVIDER="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/providers/${PROVIDER_ID}"
 SHEET_ID_VALUE="${SHEET_ID:-}"
