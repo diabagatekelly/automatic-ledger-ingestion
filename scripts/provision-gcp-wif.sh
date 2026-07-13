@@ -64,6 +64,30 @@ retry() {
   done
 }
 
+# Store NAME=VALUE in Secret Manager idempotently: create the secret if absent,
+# add a new version only when the value actually changed (so re-runs don't
+# clutter version history), and grant the runtime SA read access. `access
+# latest` fails on a brand-new secret (no versions yet) -> current stays empty
+# -> treated as changed.
+store_secret() {
+  local name="$1" value="$2" current
+  echo "-- Secret Manager: $name"
+  gcloud secrets describe "$name" --project="$PROJECT_ID" >/dev/null 2>&1 \
+    || gcloud secrets create "$name" --project="$PROJECT_ID" --replication-policy=automatic
+  current="$(gcloud secrets versions access latest \
+    --secret="$name" --project="$PROJECT_ID" 2>/dev/null || true)"
+  if [ "$value" = "$current" ]; then
+    echo "   value unchanged — skipping new version"
+  else
+    printf '%s' "$value" \
+      | gcloud secrets versions add "$name" --project="$PROJECT_ID" --data-file=-
+  fi
+  echo "   granting runtime SA read access"
+  retry gcloud secrets add-iam-policy-binding "$name" --project="$PROJECT_ID" \
+    --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
+    --role="roles/secretmanager.secretAccessor" >/dev/null
+}
+
 if [ -z "$PROJECT_ID" ]; then
   echo "ERROR: no project set. Run: gcloud config set project <id>" >&2
   exit 1
@@ -184,27 +208,23 @@ if [ -z "${WHATSAPP_VERIFY_TOKEN:-}" ]; then
   echo "ERROR: WHATSAPP_VERIFY_TOKEN is empty — refusing to store an unusable secret." >&2
   exit 1
 fi
+store_secret whatsapp-verify-token "$WHATSAPP_VERIFY_TOKEN"
 
-echo "-- Secret Manager: whatsapp-verify-token"
-gcloud secrets describe whatsapp-verify-token --project="$PROJECT_ID" >/dev/null 2>&1 \
-  || gcloud secrets create whatsapp-verify-token --project="$PROJECT_ID" --replication-policy=automatic
-
-# Only add a new version when the value actually changed, so re-runs don't
-# clutter version history. `access latest` fails on a brand-new secret (no
-# versions yet) -> CURRENT stays empty -> treated as changed.
-CURRENT="$(gcloud secrets versions access latest \
-  --secret=whatsapp-verify-token --project="$PROJECT_ID" 2>/dev/null || true)"
-if [ "$WHATSAPP_VERIFY_TOKEN" = "$CURRENT" ]; then
-  echo "   value unchanged — skipping new version"
-else
-  printf '%s' "$WHATSAPP_VERIFY_TOKEN" \
-    | gcloud secrets versions add whatsapp-verify-token --project="$PROJECT_ID" --data-file=-
+# Gemini API key (Google AI Studio) — mounted as GEMINI_API_KEY on the function
+# so it can parse notes (#4). The function tolerates a missing key by falling
+# back to a raw-text row, but the deploy mounts gemini-api-key:latest, so the
+# secret must exist.
+if [ -z "${GEMINI_API_KEY:-}" ]; then
+  GEMINI_API_KEY="$(read_env_var GEMINI_API_KEY)"
 fi
-
-echo "-- granting runtime SA read access to the secret"
-retry gcloud secrets add-iam-policy-binding whatsapp-verify-token --project="$PROJECT_ID" \
-  --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
-  --role="roles/secretmanager.secretAccessor" >/dev/null
+if [ -z "${GEMINI_API_KEY:-}" ]; then
+  read -rsp "Gemini API key (stored in Secret Manager): " GEMINI_API_KEY; echo
+fi
+if [ -z "${GEMINI_API_KEY:-}" ]; then
+  echo "ERROR: GEMINI_API_KEY is empty — refusing to store an unusable secret." >&2
+  exit 1
+fi
+store_secret gemini-api-key "$GEMINI_API_KEY"
 
 # ---- 5. output the repo secrets --------------------------------------------
 WIF_PROVIDER="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/providers/${PROVIDER_ID}"
