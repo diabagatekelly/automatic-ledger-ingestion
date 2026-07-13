@@ -1,4 +1,4 @@
-"""Google Sheets adapter for the catering-ledger.
+"""Google Sheets adapter for the automatic-ledger-ingestion pipeline.
 
 `build_row` is pure domain logic (no I/O) and is unit-tested directly.
 `append_row` is a thin adapter over the Sheets API and is tested with a
