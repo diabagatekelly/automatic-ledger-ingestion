@@ -80,7 +80,11 @@ def test_webhook_post_appends_parsed_row_from_whatsapp_text(
     _, status = webhook(FakeRequest("POST", json=text_message_envelope("Cash sale, $200")))  # type: ignore[arg-type]
 
     assert status == 200
-    assert rows == [["2026-07-13", "Wedding Cake", "Revenue", "Revenue", "200", "Cash sale"]]
+    # Order: Date | Contract | Event | Type | Category | Amount | Notes | Status.
+    # event/status are blank here — the note is built directly, bypassing coerce.
+    assert rows == [
+        ["2026-07-13", "Wedding Cake", "", "Revenue", "Revenue", "200", "Cash sale", ""]
+    ]
 
 
 def test_webhook_post_falls_back_to_raw_text_row_when_parse_fails(
@@ -95,7 +99,7 @@ def test_webhook_post_falls_back_to_raw_text_row_when_parse_fails(
     assert status == 200
     assert len(rows) == 1
     assert rows[0][0]  # Date column populated
-    assert rows[0][5] == "Cash sale, $200"  # raw text preserved in Source/Notes
+    assert rows[0][6] == "Cash sale, $200"  # raw text preserved in Source/Notes
 
 
 def test_webhook_post_appends_parsed_row_from_receipt_image(
@@ -126,7 +130,8 @@ def test_webhook_post_appends_parsed_row_from_receipt_image(
     _, status = webhook(FakeRequest("POST", json=image_message_envelope("media-1", caption="Meat")))  # type: ignore[arg-type]
 
     assert status == 200
-    assert rows == [["2026-07-10", "", "Ingredients", "Expense", "20000", "Meat purchase"]]
+    # Order: Date | Contract | Event | Type | Category | Amount | Notes | Status.
+    assert rows == [["2026-07-10", "", "", "Expense", "Ingredients", "20000", "Meat purchase", ""]]
     assert captured == {"image_bytes": b"jpeg-bytes", "mime_type": "image/jpeg", "caption": "Meat"}
 
 
@@ -145,7 +150,7 @@ def test_webhook_post_falls_back_to_caption_row_when_image_parse_fails(
     assert status == 200
     assert len(rows) == 1
     assert rows[0][0]  # Date populated
-    assert rows[0][5] == "Lunch receipt"  # caption preserved in Source/Notes
+    assert rows[0][6] == "Lunch receipt"  # caption preserved in Source/Notes
 
 
 def test_webhook_post_appends_marker_row_when_media_download_fails(
@@ -164,7 +169,7 @@ def test_webhook_post_appends_marker_row_when_media_download_fails(
     assert status == 200
     assert len(rows) == 1  # a captionless, unfetchable photo is NOT silently dropped
     assert rows[0][0]  # Date populated
-    assert rows[0][5] == _UNREADABLE_IMAGE_NOTE  # exact marker lands in Source/Notes
+    assert rows[0][6] == _UNREADABLE_IMAGE_NOTE  # exact marker lands in Source/Notes
 
 
 def test_webhook_post_appends_a_row_for_both_text_and_image_in_one_payload(
@@ -200,7 +205,7 @@ def test_webhook_post_appends_a_row_for_both_text_and_image_in_one_payload(
 
     assert status == 200
     assert len(rows) == 2  # one row per message, both paths run on the same webhook
-    assert rows[0][5] == "Cash sale"  # text row appended first
+    assert rows[0][6] == "Cash sale"  # text row appended first (Notes now col 7)
     assert rows[1][1] == "ONEP"  # image row appended second
 
 

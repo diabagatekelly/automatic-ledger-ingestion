@@ -19,25 +19,37 @@
 ```json
 {
   "date": "YYYY-MM-DD",
-  "contract_name": "string",
+  "contract_name": "string (the client/account who books or pays)",
+  "event": "string (the specific occasion, e.g. 'Diallo wedding')",
   "category": "Ingredients | Staff Salary | Revenue | ...",
   "type": "Expense | Revenue",
   "amount": 0.00,
   "notes": "string",
+  "status": "Paid | Owed to us | Owed by us",
   "confidence": "high | low"
 }
 ```
 
+`contract_name` (the ongoing client) and `event` (the one-off occasion) are kept
+**separate** so the Sheet can group either way. `status` is the payment-settlement
+lifecycle: the model sets the initial value (defaulting to `Paid`), and the owner
+flips a row to `Paid` by hand when the money actually arrives. Those three states
+let one flat ledger answer **cash on hand** (`Paid`), **money owed to us**
+(receivables — `Owed to us`), and **money we owe** (payables — `Owed by us`).
+
 ## Google Sheet layout
 
 **Tab A — All Transactions** (append-only ledger)
-`Date | Contract Name | Category | Type | Amount | Source/Notes`
+`Date | Contract Name | Event | Type | Category | Amount | Source/Notes | Status`
 
 **Tab B — Monthly Summary** (auditor dashboard)
 - `B3` "Select Month" — defaults to `=TEXT(TODAY(),"mmmm yyyy")`, overridable.
 - Hidden helper cells `X1`/`X2` — month start/end derived from `B3`.
 - Per-category totals via `SUMIFS` filtered by Contract, Category, and the
-  `X1..X2` date range.
+  `X1..X2` date range. `SUMIFS` can also filter by `Status` to split settled cash
+  from outstanding receivables/payables.
+- **Note:** Tab A column letters shifted with the Event/Status columns above —
+  any hard-coded column references in Tab B formulas must be updated to match.
 
 ## Security posture
 
