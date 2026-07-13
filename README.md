@@ -1,4 +1,4 @@
-# catering-ledger
+# automatic-ledger-ingestion
 
 Automated, near-zero-cost accounting pipeline for a small catering business.
 

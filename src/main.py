@@ -1,4 +1,4 @@
-"""Cloud Function entry point for the catering-ledger 'Snap & Chat' webhook.
+"""Cloud Function entry point for the automatic-ledger-ingestion 'Snap & Chat' webhook.
 
 This is the walking skeleton (see Issues #1-#2). It currently:
   - answers the WhatsApp webhook verification handshake (GET)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Provision keyless CD (Workload Identity Federation) for catering-ledger.
+# Provision keyless CD (Workload Identity Federation) for automatic-ledger-ingestion.
 #
 # Run ONCE, locally, after authenticating:
 #     gcloud auth login
@@ -16,13 +16,13 @@
 #     --set-gh-secrets (requires `gh auth login`).
 #
 # Prereq NOT done here (one-time, manual): share the Sheet with the runtime SA
-# ($RUNTIME_SA_EMAIL) as Editor. For catering-ledger that was already done for
+# ($RUNTIME_SA_EMAIL) as Editor. For automatic-ledger-ingestion that was already done for
 # Issue #1.
 set -euo pipefail
 
 # ---- config (override any of these via environment) -------------------------
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null)}"
-GITHUB_REPO="${GITHUB_REPO:-diabagatekelly/catering-ledger}"
+GITHUB_REPO="${GITHUB_REPO:-diabagatekelly/automatic-ledger-ingestion}"
 REGION="${REGION:-us-central1}"
 POOL_ID="${POOL_ID:-github-pool}"
 PROVIDER_ID="${PROVIDER_ID:-github-provider}"
@@ -132,7 +132,7 @@ gcloud services enable \
 echo "-- deployer SA: $DEPLOYER_SA_EMAIL"
 gcloud iam service-accounts describe "$DEPLOYER_SA_EMAIL" --project "$PROJECT_ID" >/dev/null 2>&1 \
   || gcloud iam service-accounts create "$DEPLOYER_SA_NAME" --project "$PROJECT_ID" \
-       --display-name="GitHub Actions deployer (catering-ledger)"
+       --display-name="GitHub Actions deployer (automatic-ledger-ingestion)"
 
 # A freshly created SA is eventually consistent; the IAM bindings below are
 # wrapped in retry() to ride out the propagation lag.
