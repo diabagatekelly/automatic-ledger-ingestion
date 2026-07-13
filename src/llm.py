@@ -1,7 +1,7 @@
 """Gemini adapter: turn a free-text cash-sale note into structured columns.
 
 ``coerce_note`` is pure domain logic (dict → ``ParsedNote``) and is unit-tested
-directly. ``parse_note`` is the thin adapter over Gemini 2.5 Flash: it builds a
+directly. ``parse_note`` is the thin adapter over Gemini Flash: it builds a
 client, asks for JSON against the contract in ``docs/ARCHITECTURE.md``, and
 coerces the result. Any failure (no key, API error, non-JSON) returns ``None``
 so the caller can fall back to the raw-text row from Issue #1 — nothing is lost.
@@ -10,6 +10,7 @@ so the caller can fall back to the raw-text row from Issue #1 — nothing is los
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from datetime import date
@@ -17,6 +18,8 @@ from typing import Any
 
 from google import genai
 from google.genai import types
+
+logger = logging.getLogger(__name__)
 
 # Alias that always resolves to the current Gemini Flash model. Pinning a
 # specific version (e.g. gemini-2.5-flash) breaks when Google retires it for
@@ -104,7 +107,7 @@ def _build_client() -> genai.Client:
 
 
 def parse_note(text: str, today: date) -> ParsedNote | None:
-    """Parse a free-text note into structured columns via Gemini 2.5 Flash.
+    """Parse a free-text note into structured columns via Gemini Flash.
 
     Returns a ``ParsedNote`` on success, or ``None`` on any failure (missing key,
     API error, non-JSON response) so the caller can fall back to a raw-text row.
@@ -124,6 +127,10 @@ def parse_note(text: str, today: date) -> ParsedNote | None:
         data = json.loads(response.text or "")
     except Exception:
         # Deliberately broad: never let a parse hiccup drop the owner's message.
+        # Logged at WARNING (not ERROR) because falling back is expected on
+        # transient throttling (free-tier 429) — exc_info keeps the cause
+        # visible in Cloud Logging without alarming noise.
+        logger.warning("Gemini parse failed; falling back to raw-text row", exc_info=True)
         return None
     if not isinstance(data, dict):
         return None

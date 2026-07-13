@@ -1,3 +1,4 @@
+import dataclasses
 from datetime import date
 from unittest.mock import MagicMock
 
@@ -42,19 +43,29 @@ def test_build_row_from_note_maps_every_column() -> None:
     ]
 
 
-def test_build_row_from_note_defuses_formula_injection_in_text_fields() -> None:
-    note = ParsedNote(
-        date="2026-07-13",
-        contract_name="=HYPERLINK(evil)",
-        category="Revenue",
-        type="Revenue",
-        amount="200",
-        notes="@SUM(A1:A9)",
-        confidence="high",
-    )
-    row = build_row_from_note(note)
-    assert row[1] == "'=HYPERLINK(evil)"  # Contract Name
-    assert row[5] == "'@SUM(A1:A9)"  # Source/Notes
+# Column order maps each ParsedNote field to its index in the appended row.
+_FIELD_INDEX = {"date": 0, "contract_name": 1, "category": 2, "type": 3, "amount": 4, "notes": 5}
+_BASE_NOTE = ParsedNote(
+    date="2026-07-13",
+    contract_name="Wedding Cake",
+    category="Revenue",
+    type="Revenue",
+    amount="200",
+    notes="Cash sale",
+    confidence="high",
+)
+
+
+@pytest.mark.parametrize("field", list(_FIELD_INDEX))
+@pytest.mark.parametrize("trigger", ["=", "+", "-", "@"])
+def test_build_row_from_note_defuses_every_trigger_in_every_text_cell(
+    field: str, trigger: str
+) -> None:
+    # Every cell is text in the sheet, so a leading formula trigger in ANY
+    # column (including Amount, e.g. "=1+2") must be prefixed with an apostrophe.
+    value = f"{trigger}1+2" if field == "amount" else f"{trigger}evil"
+    row = build_row_from_note(dataclasses.replace(_BASE_NOTE, **{field: value}))
+    assert row[_FIELD_INDEX[field]] == f"'{value}"
 
 
 # --- append_row (Sheets adapter, mocked client) ---

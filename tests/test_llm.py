@@ -115,8 +115,27 @@ def test_parse_note_returns_structured_note_from_gemini_json(
     assert note is not None
     assert note.contract_name == "Wedding Cake"
     assert note.amount == "200"
-    # The note text is part of the prompt sent to the model.
-    assert "Cash sale, $200, Wedding Cake" in str(client.last_kwargs.get("contents"))
+    # Both the note text and the current date go into the prompt — the latter is
+    # what the system instruction resolves relative dates ("today") against.
+    contents = str(client.last_kwargs.get("contents"))
+    assert "Cash sale, $200, Wedding Cake" in contents
+    assert TODAY.isoformat() in contents
+
+
+def test_parse_note_fills_defaults_for_a_sparse_gemini_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A valid but mostly-empty object must still yield a usable row via
+    # coerce_note's defaults (today's date, raw text in notes, low confidence).
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text='{"amount": 200}'))
+
+    note = parse_note("Cash sale", TODAY)
+
+    assert note is not None
+    assert note.amount == "200"
+    assert note.date == TODAY.isoformat()
+    assert note.notes == "Cash sale"  # falls back to the raw note
+    assert note.confidence == "low"
 
 
 def test_parse_note_returns_none_when_model_returns_non_json(
@@ -162,7 +181,15 @@ def test_build_client_raises_without_api_key(monkeypatch: pytest.MonkeyPatch) ->
         _build_client()
 
 
-def test_build_client_constructs_client_with_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_client_passes_api_key_to_genai(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_client(*, api_key: str) -> object:
+        captured["api_key"] = api_key
+        return object()
+
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    client = _build_client()
-    assert client is not None
+    monkeypatch.setattr("src.llm.genai.Client", fake_client)
+
+    assert _build_client() is not None
+    assert captured["api_key"] == "test-key"
