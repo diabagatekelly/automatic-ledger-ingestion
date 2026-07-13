@@ -14,7 +14,7 @@ appends a row to a Google Sheet that is also the owner's UI and the auditor's da
 Design principle: **fire-and-forget** for the owner, **near-zero cost/maintenance** for the dev.
 
 ## Stack
-GCP Cloud Functions (Gen2, Python 3.12) · Gemini Flash (`gemini-flash-latest`, multimodal) ·
+GCP Cloud Functions (Gen2, Python 3.12) · Gemini Flash-Lite (`gemini-flash-lite-latest`, multimodal) ·
 WhatsApp Cloud API · Google Sheets · GitHub Actions (CI + keyless CD via WIF).
 
 ## Repo map

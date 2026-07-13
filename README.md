@@ -30,7 +30,7 @@ database, the owner's UI, and the auditor's dashboard.
 |--------------|------------------------------------------|-----|
 | Compute      | GCP Cloud Functions (Gen2)               | Real serverless skills, low maintenance, generous free tier |
 | Language     | Python 3.12                              | Terse for Google APIs + Gemini |
-| Parsing      | Gemini Flash (`gemini-flash-latest`)     | Free tier covers image + text + audio; ~250 req/day free |
+| Parsing      | Gemini Flash-Lite (`gemini-flash-lite-latest`) | Free tier covers image + text + audio; higher free quota than full Flash |
 | Ingestion    | WhatsApp Cloud API                       | Owner already uses it; inbound + service replies are free |
 | Storage / UI | Google Sheets                            | Free; single source of truth *and* the owner-facing UI |
 | CI / CD      | GitHub Actions (keyless deploy via WIF)  | No stored service-account keys; native to the repo |
