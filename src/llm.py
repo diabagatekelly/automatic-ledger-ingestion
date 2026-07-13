@@ -33,8 +33,10 @@ _DEFAULT_MODEL = "gemini-flash-latest"
 _SYSTEM_INSTRUCTION = (
     "You extract a single catering ledger entry from a short note written by the "
     "business owner. Return ONLY a JSON object with these keys:\n"
-    '  "date": ISO date YYYY-MM-DD (resolve relative dates like "today" against '
-    "the provided current date),\n"
+    '  "date": the date the TRANSACTION occurred, as ISO YYYY-MM-DD. Use a date '
+    'stated in the note (e.g. "July 3rd", "2026-06-28"); resolve relative dates '
+    '("today", "yesterday") against the provided current date; only if no date is '
+    "stated at all, use the current date,\n"
     '  "contract_name": the client/event name, or "" if none is stated,\n'
     '  "category": one of Ingredients, Staff Salary, Revenue, Equipment, '
     "Transport, Other,\n"
@@ -124,7 +126,10 @@ def parse_note(text: str, today: date) -> ParsedNote | None:
                 temperature=0.0,
             ),
         )
-        data = json.loads(response.text or "")
+        # raw_decode parses the FIRST JSON value and ignores anything after it:
+        # Gemini occasionally appends a stray "}" or trailing text even in JSON
+        # mode, which json.loads would reject as "Extra data".
+        data, _ = json.JSONDecoder().raw_decode((response.text or "").lstrip())
     except Exception:
         # Deliberately broad: never let a parse hiccup drop the owner's message.
         # Logged at WARNING (not ERROR) because falling back is expected on

@@ -164,6 +164,21 @@ def test_parse_note_returns_none_when_client_cannot_be_built(
     assert parse_note("Cash sale", TODAY) is None
 
 
+def test_parse_note_tolerates_trailing_data_after_the_json_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Gemini (even in JSON mode) occasionally appends a stray "}" or extra text
+    # after the object. Parse the first JSON value rather than dropping the note.
+    body = '{"contract_name": "Wedding Cake", "amount": 200, "confidence": "high"}\n}'
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text=body))
+
+    note = parse_note("Cash sale, $200, Wedding Cake", TODAY)
+
+    assert note is not None
+    assert note.contract_name == "Wedding Cake"
+    assert note.amount == "200"
+
+
 def test_parse_note_returns_none_when_model_returns_non_object_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
