@@ -63,7 +63,7 @@ jobs:
             --trigger-http \
             --allow-unauthenticated \
             --service-account="${{ secrets.GCP_RUNTIME_SA }}" \
-            --set-env-vars=SHEET_ID="${{ secrets.SHEET_ID }}",GEMINI_MODEL=gemini-flash-latest \
+            --set-env-vars=SHEET_ID="${{ secrets.SHEET_ID }}",GEMINI_MODEL=gemini-flash-lite-latest \
             --set-secrets=WHATSAPP_VERIFY_TOKEN=whatsapp-verify-token:latest,GEMINI_API_KEY=gemini-api-key:latest
 
       - name: Smoke test — deployed handler answers

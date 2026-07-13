@@ -21,11 +21,13 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-# Alias that always resolves to the current Gemini Flash model. Pinning a
-# specific version (e.g. gemini-2.5-flash) breaks when Google retires it for
-# new users — the alias tracks the latest free-tier flash instead. Override
-# with GEMINI_MODEL to pin a version.
-_DEFAULT_MODEL = "gemini-flash-latest"
+# Alias that always resolves to the current Gemini Flash-Lite model. Flash-Lite
+# over full Flash for its higher free-tier quota / lower throttling (full Flash
+# returns frequent 429/503 on the free tier, dropping the owner's messages to a
+# raw-text fallback) — and it still parses these short notes correctly, incl.
+# French + CFA amounts like "20.000". The alias tracks the latest version so a
+# retired pin can't break us; override with GEMINI_MODEL (e.g. gemini-flash-latest).
+_DEFAULT_MODEL = "gemini-flash-lite-latest"
 
 # Strict system instruction. The model must return ONLY JSON matching the
 # contract; ``response_mime_type`` below also forces JSON, but stating it keeps
