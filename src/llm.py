@@ -81,12 +81,68 @@ _ALLOWED_STATUSES = ("Paid", "Owed to us", "Owed by us")
 # header — a 429 can advertise up to 60s, which we'd have to cap to _RETRY_MAX_DELAY
 # anyway to protect the ACK budget, so bounded exponential backoff is simpler and
 # strictly safer.
-_TRANSIENT_STATUS_CODES = (429, 503)
 _RETRY_MAX_ATTEMPTS = 3  # initial call + up to 2 retries
 _RETRY_INITIAL_DELAY = 0.5  # seconds before the first retry
 _RETRY_EXP_BASE = 2.0  # delay multiplier after each attempt
 _RETRY_MAX_DELAY = 4.0  # per-retry wait cap, keeps the total bounded
 _RETRY_JITTER = 0.25  # add [0, delay * _RETRY_JITTER] to avoid synchronised retries
+
+# Parse-outcome telemetry (Issue #34). Every parse emits one structured JSON log
+# line (see _log_parse_outcome) tagged with a stable ``reason`` bucket, counted by
+# a Cloud Monitoring log-based metric — see docs/OBSERVABILITY.md for the metric +
+# Logs Explorer query. ``_classify_error`` is the SINGLE source of transient-vs-
+# non-transient truth, shared with #33's retry decision (transient == one of
+# ``_TRANSIENT_REASONS``) so the retry policy and the telemetry never drift.
+_REASON_TRANSIENT_429 = "transient_429"
+_REASON_TRANSIENT_503 = "transient_503"
+_REASON_NO_API_KEY = "no_api_key"
+_REASON_BAD_JSON = "bad_json"
+_REASON_OTHER = "other"
+_TRANSIENT_REASONS = (_REASON_TRANSIENT_429, _REASON_TRANSIENT_503)
+
+
+class MissingAPIKeyError(RuntimeError):
+    """Raised when ``GEMINI_API_KEY`` is unset — a config error, typed so the
+    telemetry classifier can bucket it distinctly (``no_api_key``) rather than
+    string-matching a generic ``RuntimeError``."""
+
+
+def _classify_error(exc: BaseException) -> str:
+    """Bucket a parse exception into a stable ``reason`` (telemetry + retry).
+
+    The transient buckets (``transient_429``/``transient_503``) are exactly what
+    #33 retries; every other bucket is non-transient and falls back immediately.
+    """
+    if isinstance(exc, errors.APIError):
+        if exc.code == 429:
+            return _REASON_TRANSIENT_429
+        if exc.code == 503:
+            return _REASON_TRANSIENT_503
+        return _REASON_OTHER
+    if isinstance(exc, MissingAPIKeyError):
+        return _REASON_NO_API_KEY
+    if isinstance(exc, json.JSONDecodeError):
+        return _REASON_BAD_JSON
+    return _REASON_OTHER
+
+
+def _log_parse_outcome(outcome: str, *, reason: str | None = None) -> None:
+    """Emit one structured JSON log line per parse outcome for #34 telemetry.
+
+    Printed as a single-line JSON object to stdout so Cloud Run's logging agent
+    parses it into ``jsonPayload`` with queryable fields (``event``/``outcome``/
+    ``reason``) — no logging library or external service needed. A Cloud
+    Monitoring log-based metric counts these; see docs/OBSERVABILITY.md.
+    """
+    entry: dict[str, str] = {
+        "severity": "WARNING" if outcome == "fallback" else "INFO",
+        "message": f"gemini_parse outcome={outcome}" + (f" reason={reason}" if reason else ""),
+        "event": "gemini_parse",
+        "outcome": outcome,
+    }
+    if reason is not None:
+        entry["reason"] = reason
+    print(json.dumps(entry), flush=True)
 
 
 @dataclass(frozen=True)
@@ -164,7 +220,7 @@ def _build_client() -> genai.Client:
     """Build a Gemini client from ``GEMINI_API_KEY`` (raises if unset)."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY environment variable is not set")
+        raise MissingAPIKeyError("GEMINI_API_KEY environment variable is not set")
     return genai.Client(api_key=api_key)
 
 
@@ -198,7 +254,9 @@ def _generate_with_retry(
         try:
             return client.models.generate_content(model=model, contents=contents, config=config)
         except errors.APIError as exc:
-            if exc.code not in _TRANSIENT_STATUS_CODES or attempt == _RETRY_MAX_ATTEMPTS:
+            # Same classifier the telemetry uses (#34), so "what we retry" and
+            # "what we count as transient" can never diverge.
+            if _classify_error(exc) not in _TRANSIENT_REASONS or attempt == _RETRY_MAX_ATTEMPTS:
                 raise
             wait = delay + _uniform(0.0, delay * _RETRY_JITTER)
             logger.info(
@@ -237,15 +295,29 @@ def _generate_note(contents: Any, raw_text: str, today: date) -> ParsedNote | No
         # Gemini occasionally appends a stray "}" or trailing text even in JSON
         # mode, which json.loads would reject as "Extra data".
         data, _ = json.JSONDecoder().raw_decode((response.text or "").lstrip())
-    except Exception:
+    except Exception as exc:
         # Deliberately broad: never let a parse hiccup drop the owner's message.
-        # Logged at WARNING (not ERROR) because falling back is expected on
-        # transient throttling (free-tier 429) — exc_info keeps the cause
-        # visible in Cloud Logging without alarming noise.
+        # One structured outcome line (queryable, drives the log-based metric #34)
+        # plus the human WARNING with exc_info — falling back is expected on
+        # transient throttling (free-tier 429), so WARNING (not ERROR) keeps the
+        # cause visible in Cloud Logging without alarming noise.
+        _log_parse_outcome("fallback", reason=_classify_error(exc))
         logger.warning("Gemini parse failed; falling back to raw row", exc_info=True)
         return None
     if not isinstance(data, dict):
+        # Valid JSON but not an object (e.g. a list) is unusable — same bucket as
+        # a decode failure from the owner's point of view. Mirror the decode
+        # path's human-readable WARNING (there's no exception here) so this stays
+        # diagnosable if the model starts returning non-objects; the repr is
+        # truncated so a large value can't flood the logs.
+        _log_parse_outcome("fallback", reason=_REASON_BAD_JSON)
+        logger.warning(
+            "Gemini returned non-object JSON (type=%s, value=%s); falling back to raw row",
+            type(data).__name__,
+            repr(data)[:200],
+        )
         return None
+    _log_parse_outcome("success")
     return coerce_note(data, raw_text=raw_text, today=today)
 
 
