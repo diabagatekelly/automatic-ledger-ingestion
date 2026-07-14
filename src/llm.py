@@ -306,8 +306,16 @@ def _generate_note(contents: Any, raw_text: str, today: date) -> ParsedNote | No
         return None
     if not isinstance(data, dict):
         # Valid JSON but not an object (e.g. a list) is unusable — same bucket as
-        # a decode failure from the owner's point of view.
+        # a decode failure from the owner's point of view. Mirror the decode
+        # path's human-readable WARNING (there's no exception here) so this stays
+        # diagnosable if the model starts returning non-objects; the repr is
+        # truncated so a large value can't flood the logs.
         _log_parse_outcome("fallback", reason=_REASON_BAD_JSON)
+        logger.warning(
+            "Gemini returned non-object JSON (type=%s, value=%s); falling back to raw row",
+            type(data).__name__,
+            repr(data)[:200],
+        )
         return None
     _log_parse_outcome("success")
     return coerce_note(data, raw_text=raw_text, today=today)

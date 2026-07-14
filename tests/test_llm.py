@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import date
 
 import pytest
@@ -393,8 +394,13 @@ def test_parse_note_logs_success_outcome(
 
     entries = _outcome_entries(capsys)
     assert len(entries) == 1
-    assert entries[0]["outcome"] == "success"
-    assert "reason" not in entries[0]
+    entry = entries[0]
+    # Assert the full structured-log contract, not just the outcome.
+    assert entry["event"] == "gemini_parse"
+    assert entry["severity"] == "INFO"
+    assert entry["outcome"] == "success"
+    assert "reason" not in entry
+    assert entry["message"].startswith("gemini_parse outcome=success")
 
 
 @pytest.mark.parametrize("code, reason", [(429, "transient_429"), (503, "transient_503")])
@@ -412,9 +418,13 @@ def test_parse_note_logs_transient_fallback_reason(
 
     entries = _outcome_entries(capsys)
     assert len(entries) == 1
-    assert entries[0]["outcome"] == "fallback"
-    assert entries[0]["reason"] == reason
-    assert entries[0]["severity"] == "WARNING"
+    entry = entries[0]
+    # Full contract on a fallback: event, WARNING severity, reason, message prefix.
+    assert entry["event"] == "gemini_parse"
+    assert entry["severity"] == "WARNING"
+    assert entry["outcome"] == "fallback"
+    assert entry["reason"] == reason
+    assert entry["message"].startswith("gemini_parse outcome=fallback")
 
 
 def test_parse_note_logs_no_api_key_fallback(
@@ -439,14 +449,20 @@ def test_parse_note_logs_bad_json_fallback(
 
 
 def test_parse_note_logs_bad_json_for_non_object_response(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # Valid JSON but not an object (a list) is unusable — same bucket as a decode error.
     monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text="[1, 2, 3]"))
 
-    assert parse_note("hi", TODAY) is None
+    with caplog.at_level(logging.WARNING, logger="src.llm"):
+        assert parse_note("hi", TODAY) is None
 
     assert _outcome_entries(capsys)[0]["reason"] == "bad_json"
+    # Mirrors the decode path with a human-readable WARNING naming the bad type.
+    assert "non-object" in caplog.text.lower()
+    assert "list" in caplog.text.lower()
 
 
 def test_parse_image_logs_outcome(
