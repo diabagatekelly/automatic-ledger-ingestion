@@ -12,13 +12,33 @@ class FakeRequest:
         method: str,
         args: dict[str, str] | None = None,
         json: object = None,
+        headers: dict[str, str] | None = None,
+        data: bytes = b"",
     ) -> None:
         self.method = method
         self.args = args or {}
         self._json = json
+        self.headers = headers or {}
+        self._data = data
 
     def get_json(self, silent: bool = False) -> object:
         return self._json
+
+    def get_data(self) -> bytes:
+        return self._data
+
+
+@pytest.fixture(autouse=True)
+def _bypass_signature_and_stub_sends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the POST tests to an authenticated request with a no-op reply.
+
+    Signature verification (#8) and the outbound confirmation reply are exercised
+    by their own dedicated tests; every other POST test asserts row-building, so
+    it should not have to sign a body or hit the send API. Individual tests
+    re-monkeypatch either hook when they are the thing under test.
+    """
+    monkeypatch.setattr("src.main.verify_signature", lambda *a, **k: True)
+    monkeypatch.setattr("src.main.send_text_message", lambda *a, **k: None)
 
 
 # --- verify_webhook (pure) ---
@@ -277,3 +297,102 @@ def test_webhook_post_acks_empty_body_without_appending(
 def test_webhook_rejects_other_methods() -> None:
     _, status = webhook(FakeRequest("DELETE"))  # type: ignore[arg-type]
     assert status == 405
+
+
+# --- #8: HMAC signature verification (fail-closed) ---
+
+
+def test_webhook_post_rejects_an_invalid_signature_without_appending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows: list[list[str]] = []
+    monkeypatch.setattr("src.main.append_row", lambda row: rows.append(row))
+    monkeypatch.setattr("src.main.verify_signature", lambda *a, **k: False)
+
+    _, status = webhook(FakeRequest("POST", json=text_message_envelope("Cash sale, $200")))  # type: ignore[arg-type]
+
+    assert status == 403
+    assert rows == []  # an unauthenticated POST must never write a row
+
+
+def test_webhook_post_verifies_signature_over_the_raw_body_and_app_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WHATSAPP_APP_SECRET", "app-secret")
+    monkeypatch.setattr("src.main.append_row", lambda row: None)
+    monkeypatch.setattr("src.main.parse_note", lambda text, today: None)
+    captured: dict[str, object] = {}
+
+    def fake_verify(raw_body: bytes, header: str | None, secret: str | None) -> bool:
+        captured.update(raw_body=raw_body, header=header, secret=secret)
+        return True
+
+    monkeypatch.setattr("src.main.verify_signature", fake_verify)
+
+    webhook(
+        FakeRequest(  # type: ignore[arg-type]
+            "POST",
+            json=text_message_envelope("x"),
+            headers={"X-Hub-Signature-256": "sha256=abc"},
+            data=b"raw-bytes",
+        )
+    )
+
+    # HMAC must be checked against the EXACT received bytes, not the re-serialized
+    # JSON, or a benign reordering would fail an otherwise-valid signature.
+    assert captured == {"raw_body": b"raw-bytes", "header": "sha256=abc", "secret": "app-secret"}
+
+
+# --- #8: confirmation reply to sender ---
+
+
+def test_webhook_post_sends_a_confirmation_reply_after_appending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.llm import ParsedNote
+
+    monkeypatch.setattr("src.main.append_row", lambda row: None)
+    parsed = ParsedNote(
+        date="2026-07-13",
+        contract_name="Diallo",
+        event="Diallo wedding",
+        category="Revenue",
+        type="Revenue",
+        amount="200",
+        notes="Deposit",
+        confidence="high",
+        status="Paid",
+    )
+    monkeypatch.setattr("src.main.parse_note", lambda text, today: parsed)
+    sent: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        "src.main.send_text_message",
+        lambda to, body, phone_number_id: sent.append((to, body, phone_number_id)),
+    )
+
+    _, status = webhook(FakeRequest("POST", json=text_message_envelope("Diallo wedding, 200")))  # type: ignore[arg-type]
+
+    assert status == 200
+    assert len(sent) == 1  # exactly one reply per appended row
+    to, body, phone_number_id = sent[0]
+    assert to == "15551234567"  # reply goes back to the inbound sender
+    assert phone_number_id == "123"
+    assert "200" in body and "Diallo wedding" in body
+
+
+def test_webhook_post_confirmation_failure_does_not_block_the_append(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows: list[list[str]] = []
+    monkeypatch.setattr("src.main.append_row", lambda row: rows.append(row))
+    monkeypatch.setattr("src.main.parse_note", lambda text, today: None)
+
+    def boom(*a: object, **k: object) -> None:
+        raise RuntimeError("send API down")
+
+    monkeypatch.setattr("src.main.send_text_message", boom)
+
+    _, status = webhook(FakeRequest("POST", json=text_message_envelope("Cash sale, $200")))  # type: ignore[arg-type]
+
+    assert status == 200  # a failed reply is best-effort; the row still landed
+    assert len(rows) == 1

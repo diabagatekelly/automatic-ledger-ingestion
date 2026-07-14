@@ -241,6 +241,22 @@ if [ -z "${WHATSAPP_ACCESS_TOKEN:-}" ]; then
 fi
 store_secret whatsapp-access-token "$WHATSAPP_ACCESS_TOKEN"
 
+# WhatsApp app secret (Meta App dashboard -> Settings -> Basic -> App secret) —
+# mounted as WHATSAPP_APP_SECRET so the function can verify each POST's
+# X-Hub-Signature-256 HMAC (#8). The deploy mounts whatsapp-app-secret:latest and
+# the handler fails closed without it, so the secret MUST exist before deploy.
+if [ -z "${WHATSAPP_APP_SECRET:-}" ]; then
+  WHATSAPP_APP_SECRET="$(read_env_var WHATSAPP_APP_SECRET)"
+fi
+if [ -z "${WHATSAPP_APP_SECRET:-}" ]; then
+  read -rsp "WhatsApp app secret (stored in Secret Manager): " WHATSAPP_APP_SECRET; echo
+fi
+if [ -z "${WHATSAPP_APP_SECRET:-}" ]; then
+  echo "ERROR: WHATSAPP_APP_SECRET is empty — refusing to store an unusable secret." >&2
+  exit 1
+fi
+store_secret whatsapp-app-secret "$WHATSAPP_APP_SECRET"
+
 # ---- 5. output the repo secrets --------------------------------------------
 WIF_PROVIDER="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/providers/${PROVIDER_ID}"
 SHEET_ID_VALUE="${SHEET_ID:-}"

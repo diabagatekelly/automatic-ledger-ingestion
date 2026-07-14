@@ -19,8 +19,16 @@ from flask import Request
 
 from src.llm import parse_image, parse_note
 from src.media import download_media
+from src.messaging import send_text_message
 from src.sheets import append_row, build_row, build_row_from_note
-from src.whatsapp import InboundImage, extract_image_messages, extract_message_texts
+from src.whatsapp import (
+    InboundImage,
+    build_confirmation,
+    extract_image_messages,
+    extract_message_texts,
+    extract_reply_context,
+    verify_signature,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +65,18 @@ def webhook(request: Request) -> tuple[str, int]:
         )
 
     if request.method == "POST":
+        # The endpoint is --allow-unauthenticated (Meta must reach it), so we
+        # authenticate each POST by its X-Hub-Signature-256 HMAC against the app
+        # secret (#8). Verified over the RAW body, before parsing. Fail-closed:
+        # a bad/missing signature is rejected with no side effects.
+        raw_body = request.get_data()
+        if not verify_signature(
+            raw_body,
+            request.headers.get("X-Hub-Signature-256"),
+            os.environ.get("WHATSAPP_APP_SECRET"),
+        ):
+            return ("forbidden", 403)
+
         # Meta delivers inbound messages and status callbacks as JSON. Extract
         # any text bodies and image references and append a row each; status /
         # unsupported callbacks yield none and are simply ACKed (Meta retries on
@@ -64,16 +84,36 @@ def webhook(request: Request) -> tuple[str, int]:
         # columns (#4 text, #5 image); on any failure we fall back to a raw-text
         # row so nothing is ever lost. TODO(#9): flag low-confidence rows.
         payload = request.get_json(silent=True) or {}
+        reply_context = extract_reply_context(payload)
         today = date.today()
         for text in extract_message_texts(payload):
             note = parse_note(text, today)
             row = build_row_from_note(note) if note is not None else build_row(text, today)
             append_row(row)
+            _send_confirmation(reply_context, row)
         for image in extract_image_messages(payload):
-            append_row(_row_for_image(image, today))
+            row = _row_for_image(image, today)
+            append_row(row)
+            _send_confirmation(reply_context, row)
         return ("", 200)
 
     return ("method not allowed", 405)
+
+
+def _send_confirmation(reply_context: tuple[str, str] | None, row: list[str]) -> None:
+    """Reply to the sender with a one-line summary of the row just appended (#8).
+
+    Best-effort: the row is already saved, so a send failure (or an
+    unidentifiable sender) is logged and swallowed — it must never block or
+    duplicate the append. One reply per appended row.
+    """
+    if reply_context is None:
+        return
+    sender, phone_number_id = reply_context
+    try:
+        send_text_message(sender, build_confirmation(row), phone_number_id)
+    except Exception:
+        logger.warning("Confirmation reply failed; row was still appended", exc_info=True)
 
 
 def _row_for_image(image: InboundImage, today: date) -> list[str]:
