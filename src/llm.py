@@ -14,6 +14,7 @@ import logging
 import os
 import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -173,6 +174,8 @@ def _generate_with_retry(
     model: str,
     contents: Any,
     config: types.GenerateContentConfig,
+    sleep: Callable[[float], None] | None = None,
+    uniform: Callable[[float, float], float] | None = None,
 ) -> Any:
     """Call Gemini, retrying only transient (429/503) errors with bounded backoff.
 
@@ -180,15 +183,24 @@ def _generate_with_retry(
     attempt re-raise immediately, so the caller falls back to a raw-text row
     without wasted waiting. Total added latency is capped by the retry constants
     to stay inside Meta's webhook ACK window.
+
+    ``sleep`` and ``uniform`` default to ``time.sleep`` / ``random.uniform`` and
+    exist to be injected in tests, so the backoff schedule can be observed and
+    made deterministic without patching global modules.
     """
+    _sleep = time.sleep if sleep is None else sleep
+    _uniform = random.uniform if uniform is None else uniform
     delay = _RETRY_INITIAL_DELAY
-    for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
+    attempt = 1
+    # ``while True`` (not ``for``) so ``return``/``raise`` are the only exits and
+    # the control flow is structurally exhaustive — no unreachable trailing raise.
+    while True:
         try:
             return client.models.generate_content(model=model, contents=contents, config=config)
         except errors.APIError as exc:
             if exc.code not in _TRANSIENT_STATUS_CODES or attempt == _RETRY_MAX_ATTEMPTS:
                 raise
-            wait = delay + random.uniform(0.0, delay * _RETRY_JITTER)
+            wait = delay + _uniform(0.0, delay * _RETRY_JITTER)
             logger.info(
                 "Gemini transient %s on attempt %d/%d; retrying in %.2fs",
                 exc.code,
@@ -196,10 +208,9 @@ def _generate_with_retry(
                 _RETRY_MAX_ATTEMPTS,
                 wait,
             )
-            time.sleep(wait)
+            _sleep(wait)
             delay = min(delay * _RETRY_EXP_BASE, _RETRY_MAX_DELAY)
-    # Unreachable: the final attempt either returns or re-raises above.
-    raise AssertionError("retry loop exhausted without return or raise")  # pragma: no cover
+            attempt += 1
 
 
 def _generate_note(contents: Any, raw_text: str, today: date) -> ParsedNote | None:
