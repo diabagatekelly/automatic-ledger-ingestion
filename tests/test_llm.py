@@ -2,8 +2,17 @@ import json
 from datetime import date
 
 import pytest
+from google.genai import errors
 
-from src.llm import ParsedNote, _build_client, coerce_note, parse_image, parse_note
+from src.llm import (
+    _RETRY_MAX_ATTEMPTS,
+    _RETRY_MAX_DELAY,
+    ParsedNote,
+    _build_client,
+    coerce_note,
+    parse_image,
+    parse_note,
+)
 
 TODAY = date(2026, 7, 13)
 
@@ -28,6 +37,33 @@ class FakeClient:
             raise self._raises
         assert self._text is not None
         return FakeResponse(self._text)
+
+
+class FlakyClient:
+    """generate_content raises each queued exception in turn, then returns text."""
+
+    def __init__(self, failures: list[Exception], text: str) -> None:
+        self._failures = list(failures)
+        self._text = text
+        self.models = self
+        self.calls = 0
+
+    def generate_content(self, **kwargs: object) -> FakeResponse:
+        self.calls += 1
+        if self._failures:
+            raise self._failures.pop(0)
+        return FakeResponse(self._text)
+
+
+def _api_error(code: int) -> errors.APIError:
+    """Build an errors.APIError with a given HTTP status code (503, 429, 400…)."""
+    return errors.APIError(
+        code, {"error": {"code": code, "status": "TRANSIENT", "message": "test"}}
+    )
+
+
+# A minimal but valid Gemini JSON body — coerce_note fills the rest with defaults.
+_VALID_JSON = '{"amount": 200, "type": "Revenue", "category": "Revenue", "confidence": "high"}'
 
 
 # --- coerce_note (pure) ---
@@ -202,6 +238,71 @@ def test_parse_note_returns_none_when_model_returns_non_object_json(
     # Valid JSON that isn't an object (a list) must not become a row.
     monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text="[1, 2, 3]"))
     assert parse_note("Cash sale", TODAY) is None
+
+
+# --- bounded retry on transient (429/503) errors (Issue #33) ---
+
+
+@pytest.mark.parametrize("code", [503, 429])
+def test_parse_note_retries_transient_error_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    # A transient 503/429 that clears on a later attempt should yield a PARSED
+    # row, not the raw-text fallback.
+    monkeypatch.setattr("src.llm.time.sleep", lambda _s: None)
+    client = FlakyClient([_api_error(code), _api_error(code)], _VALID_JSON)
+    monkeypatch.setattr("src.llm._build_client", lambda: client)
+
+    note = parse_note("Cash sale, 200", TODAY)
+
+    assert note is not None
+    assert note.amount == "200"
+    assert client.calls == 3  # 2 transient failures, then success
+
+
+def test_parse_note_does_not_retry_non_transient_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A non-transient error (e.g. 400 bad request) must fall back immediately —
+    # no wasted retries, no sleeping.
+    slept: list[float] = []
+    monkeypatch.setattr("src.llm.time.sleep", lambda s: slept.append(s))
+    client = FlakyClient([_api_error(400)], _VALID_JSON)
+    monkeypatch.setattr("src.llm._build_client", lambda: client)
+
+    assert parse_note("bad", TODAY) is None
+    assert client.calls == 1
+    assert slept == []
+
+
+def test_parse_note_falls_back_after_exhausting_transient_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Persistent 503 → all attempts used, then the existing raw-text fallback.
+    slept: list[float] = []
+    monkeypatch.setattr("src.llm.time.sleep", lambda s: slept.append(s))
+    client = FlakyClient([_api_error(503)] * _RETRY_MAX_ATTEMPTS, _VALID_JSON)
+    monkeypatch.setattr("src.llm._build_client", lambda: client)
+
+    assert parse_note("busy", TODAY) is None
+    assert client.calls == _RETRY_MAX_ATTEMPTS
+    assert len(slept) == _RETRY_MAX_ATTEMPTS - 1  # one wait between each attempt
+    # Each wait stays within the documented per-retry cap (+ jitter headroom).
+    assert all(0 < w <= _RETRY_MAX_DELAY * 1.5 for w in slept)
+
+
+def test_parse_image_retries_transient_error_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The retry lives in the shared _generate_note, so the image path benefits too.
+    monkeypatch.setattr("src.llm.time.sleep", lambda _s: None)
+    client = FlakyClient([_api_error(503)], _VALID_JSON)
+    monkeypatch.setattr("src.llm._build_client", lambda: client)
+
+    note = parse_image(b"\x89PNG", "image/png", TODAY, caption="receipt")
+
+    assert note is not None
+    assert client.calls == 2
 
 
 # --- parse_image (multimodal Gemini adapter, mocked client) ---
