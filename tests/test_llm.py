@@ -7,8 +7,10 @@ from google.genai import errors, types
 from src.llm import (
     _RETRY_INITIAL_DELAY,
     _RETRY_MAX_ATTEMPTS,
+    MissingAPIKeyError,
     ParsedNote,
     _build_client,
+    _classify_error,
     _generate_with_retry,
     coerce_note,
     parse_image,
@@ -348,6 +350,114 @@ def test_parse_image_retries_transient_error_then_succeeds(
 
     assert note is not None
     assert client.calls == 2
+
+
+# --- parse-outcome telemetry (Issue #34) ---
+#
+# Every parse emits one structured JSON log line (printed to stdout so Cloud
+# Run parses it into jsonPayload). The classifier that buckets the failure is
+# shared with #33's transient-vs-non-transient retry decision.
+
+
+def _outcome_entries(capsys: pytest.CaptureFixture[str]) -> list[dict[str, str]]:
+    """Extract the structured gemini_parse JSON log lines from captured stdout."""
+    entries: list[dict[str, str]] = []
+    for line in capsys.readouterr().out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and obj.get("event") == "gemini_parse":
+            entries.append(obj)
+    return entries
+
+
+def test_classify_error_buckets_every_failure_mode() -> None:
+    assert _classify_error(_api_error(429)) == "transient_429"
+    assert _classify_error(_api_error(503)) == "transient_503"
+    assert _classify_error(_api_error(400)) == "other"
+    assert _classify_error(MissingAPIKeyError("no key")) == "no_api_key"
+    assert _classify_error(json.JSONDecodeError("bad", "doc", 0)) == "bad_json"
+    assert _classify_error(ValueError("boom")) == "other"
+
+
+def test_parse_note_logs_success_outcome(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text=_VALID_JSON))
+
+    assert parse_note("Cash sale, 200", TODAY) is not None
+
+    entries = _outcome_entries(capsys)
+    assert len(entries) == 1
+    assert entries[0]["outcome"] == "success"
+    assert "reason" not in entries[0]
+
+
+@pytest.mark.parametrize("code, reason", [(429, "transient_429"), (503, "transient_503")])
+def test_parse_note_logs_transient_fallback_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    code: int,
+    reason: str,
+) -> None:
+    monkeypatch.setattr("src.llm.time.sleep", lambda _s: None)
+    client = FlakyClient([_api_error(code)] * _RETRY_MAX_ATTEMPTS, _VALID_JSON)
+    monkeypatch.setattr("src.llm._build_client", lambda: client)
+
+    assert parse_note("busy", TODAY) is None
+
+    entries = _outcome_entries(capsys)
+    assert len(entries) == 1
+    assert entries[0]["outcome"] == "fallback"
+    assert entries[0]["reason"] == reason
+    assert entries[0]["severity"] == "WARNING"
+
+
+def test_parse_note_logs_no_api_key_fallback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Real _build_client (not patched) so the missing-key error is raised + classified.
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    assert parse_note("hi", TODAY) is None
+
+    assert _outcome_entries(capsys)[0]["reason"] == "no_api_key"
+
+
+def test_parse_note_logs_bad_json_fallback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text="not json"))
+
+    assert parse_note("hi", TODAY) is None
+
+    assert _outcome_entries(capsys)[0]["reason"] == "bad_json"
+
+
+def test_parse_note_logs_bad_json_for_non_object_response(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Valid JSON but not an object (a list) is unusable — same bucket as a decode error.
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text="[1, 2, 3]"))
+
+    assert parse_note("hi", TODAY) is None
+
+    assert _outcome_entries(capsys)[0]["reason"] == "bad_json"
+
+
+def test_parse_image_logs_outcome(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The image path shares _generate_note, so it emits telemetry too.
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text=_VALID_JSON))
+
+    assert parse_image(b"x", "image/png", TODAY, caption="") is not None
+
+    assert _outcome_entries(capsys)[0]["outcome"] == "success"
 
 
 # --- parse_image (multimodal Gemini adapter, mocked client) ---
