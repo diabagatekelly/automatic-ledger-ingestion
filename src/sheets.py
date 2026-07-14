@@ -16,7 +16,7 @@ from googleapiclient.discovery import build as discovery_build
 
 from src.llm import ParsedNote
 
-_SHEET_RANGE = "All Transactions!A:F"
+_SHEET_RANGE = "All Transactions!A:H"
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _FORMULA_TRIGGERS = ("=", "+", "-", "@")
 
@@ -34,28 +34,33 @@ def _defuse_formula(text: str) -> str:
 
 
 def build_row(text: str, today: date) -> list[str]:
-    """Build a 6-column ledger row from a raw text payload.
+    """Build an 8-column ledger row from a raw text payload.
 
-    Columns: Date | Contract Name | Category | Type | Amount | Source/Notes.
-    For this slice only Date and Source/Notes are populated.
+    Columns: Date | Contract Name | Event | Type | Category | Amount |
+    Source/Notes | Status. For this fallback only Date and Source/Notes are
+    populated; Status is left blank so an unparsed row is easy to spot and
+    triage by hand.
     """
-    return [today.isoformat(), "", "", "", "", _defuse_formula(text)]
+    return [today.isoformat(), "", "", "", "", "", _defuse_formula(text), ""]
 
 
 def build_row_from_note(note: ParsedNote) -> list[str]:
-    """Build a 6-column ledger row from a Gemini-parsed note.
+    """Build an 8-column ledger row from a Gemini-parsed note.
 
-    Columns: Date | Contract Name | Category | Type | Amount | Source/Notes.
-    Text fields are defused against formula injection (the LLM echoes owner
-    input, so its output is untrusted for spreadsheet purposes).
+    Columns: Date | Contract Name | Event | Type | Category | Amount |
+    Source/Notes | Status. Text fields are defused against formula injection
+    (the LLM echoes owner input, so its output is untrusted for spreadsheet
+    purposes).
     """
     return [
         _defuse_formula(note.date),
         _defuse_formula(note.contract_name),
-        _defuse_formula(note.category),
+        _defuse_formula(note.event),
         _defuse_formula(note.type),
+        _defuse_formula(note.category),
         _defuse_formula(note.amount),
         _defuse_formula(note.notes),
+        _defuse_formula(note.status),
     ]
 
 

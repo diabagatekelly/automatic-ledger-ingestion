@@ -36,17 +36,30 @@ _SYSTEM_INSTRUCTION = (
     'stated in the note (e.g. "July 3rd", "2026-06-28"); resolve relative dates '
     '("today", "yesterday") against the provided current date; only if no date is '
     "stated at all, use the current date,\n"
-    '  "contract_name": the client/event name, or "" if none is stated,\n'
+    '  "contract_name": the CLIENT or account — who booked or pays, the ongoing '
+    'relationship (e.g. "Diallo", "ONEP"); "" if none is stated,\n'
+    '  "event": the specific occasion or function this entry belongs to (e.g. '
+    '"Diallo wedding", "ONEP retreat", "Saturday market"); "" if none is stated,\n'
     '  "category": one of Ingredients, Staff Salary, Revenue, Equipment, '
     "Transport, Other,\n"
     '  "type": "Revenue" for money coming in (sales), "Expense" for money going out,\n'
     '  "amount": the numeric amount as a number (no currency symbol),\n'
     '  "notes": a short human-readable summary of the note,\n'
+    '  "status": one of "Paid" (the money has already changed hands), "Owed to us" '
+    "(we delivered or sold but have NOT been paid yet — credit given to the "
+    'client), "Owed by us" (we bought on credit and have NOT paid the supplier '
+    'yet). Default to "Paid" unless the note clearly implies credit or non-payment,\n'
     '  "confidence": "high" if the fields are clearly stated, "low" if you had to '
     "guess.\n"
-    "Never invent an amount or contract that is not implied by the note; leave it "
-    'empty and set "confidence" to "low" instead.'
+    "Never invent an amount, contract, or event that is not implied by the note; "
+    'leave it empty and set "confidence" to "low" instead.'
 )
+
+# Payment-settlement lifecycle. The model only sets the INITIAL state from the
+# note; the owner flips a row to "Paid" in the Sheet when the money actually
+# arrives. These three states let one flat ledger answer cash-on-hand,
+# money-owed-to-us (receivables), and money-we-owe (payables).
+_ALLOWED_STATUSES = ("Paid", "Owed to us", "Owed by us")
 
 
 @dataclass(frozen=True)
@@ -60,6 +73,10 @@ class ParsedNote:
     amount: str
     notes: str
     confidence: str
+    # Appended (with defaults) so existing positional construction stays valid;
+    # coerce_note always sets both explicitly from the model's JSON.
+    event: str = ""
+    status: str = ""
 
 
 def _as_text(value: Any) -> str:
@@ -81,6 +98,21 @@ def _as_amount(value: Any) -> str:
     return _as_text(value)
 
 
+def _as_status(value: Any) -> str:
+    """Coerce a status to one of ``_ALLOWED_STATUSES`` (case-insensitive).
+
+    Defaults to "Paid" — the common completed cash sale — when the model omits
+    it or returns something off-list, so the Sheet's cash / receivable / payable
+    math never sees a stray value. The owner corrects the rarer credit rows by
+    flipping the Status cell in the Sheet.
+    """
+    text = _as_text(value)
+    for allowed in _ALLOWED_STATUSES:
+        if text.lower() == allowed.lower():
+            return allowed
+    return "Paid"
+
+
 def coerce_note(data: dict[str, Any], raw_text: str, today: date) -> ParsedNote:
     """Coerce a (possibly messy) LLM JSON object into a ``ParsedNote``.
 
@@ -91,11 +123,13 @@ def coerce_note(data: dict[str, Any], raw_text: str, today: date) -> ParsedNote:
     return ParsedNote(
         date=_as_text(data.get("date")) or today.isoformat(),
         contract_name=_as_text(data.get("contract_name")),
+        event=_as_text(data.get("event")),
         category=_as_text(data.get("category")),
         type=_as_text(data.get("type")),
         amount=_as_amount(data.get("amount")),
         notes=_as_text(data.get("notes")) or raw_text,
         confidence="high" if _as_text(data.get("confidence")).lower() == "high" else "low",
+        status=_as_status(data.get("status")),
     )
 
 

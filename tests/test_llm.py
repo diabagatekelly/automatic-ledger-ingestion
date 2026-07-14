@@ -37,24 +37,28 @@ def test_coerce_note_maps_a_full_valid_payload() -> None:
     note = coerce_note(
         {
             "date": "2026-07-13",
-            "contract_name": "Wedding Cake",
+            "contract_name": "Diallo",
+            "event": "Diallo wedding",
             "category": "Revenue",
             "type": "Revenue",
             "amount": 200,
             "notes": "Cash sale",
             "confidence": "high",
+            "status": "Owed to us",
         },
-        raw_text="Cash sale, $200, Wedding Cake",
+        raw_text="Cash sale, $200, Diallo wedding",
         today=TODAY,
     )
     assert note == ParsedNote(
         date="2026-07-13",
-        contract_name="Wedding Cake",
+        contract_name="Diallo",
+        event="Diallo wedding",
         category="Revenue",
         type="Revenue",
         amount="200",
         notes="Cash sale",
         confidence="high",
+        status="Owed to us",
     )
 
 
@@ -67,11 +71,24 @@ def test_coerce_note_defaults_missing_fields() -> None:
     note = coerce_note({}, raw_text="Cash sale, $200", today=TODAY)
     assert note.date == "2026-07-13"  # falls back to today
     assert note.contract_name == ""
+    assert note.event == ""
     assert note.category == ""
     assert note.type == ""
     assert note.amount == ""
     assert note.notes == "Cash sale, $200"  # falls back to the raw text
     assert note.confidence == "low"  # unknown → treated as low
+    assert note.status == "Paid"  # missing status defaults to a completed cash sale
+
+
+def test_coerce_note_normalizes_and_defaults_status() -> None:
+    # Case-insensitive AND whitespace-insensitive match to the allowed set
+    # (_as_text strips); anything off-list → "Paid", so the Sheet's
+    # cash/receivable/payable math never sees a stray value.
+    assert coerce_note({"status": "owed to us"}, raw_text="x", today=TODAY).status == "Owed to us"
+    assert coerce_note({"status": "OWED BY US"}, raw_text="x", today=TODAY).status == "Owed by us"
+    padded = coerce_note({"status": "  Owed to us  "}, raw_text="x", today=TODAY)
+    assert padded.status == "Owed to us"
+    assert coerce_note({"status": "later maybe"}, raw_text="x", today=TODAY).status == "Paid"
 
 
 def test_coerce_note_tolerates_wrong_types() -> None:
