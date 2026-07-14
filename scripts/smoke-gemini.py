@@ -30,7 +30,7 @@ SAMPLES = [
     "Bought 40 dollars of flour and sugar for the Diallo baptism",
 ]
 
-COLUMNS = ["Date", "Contract", "Category", "Type", "Amount", "Notes"]
+COLUMNS = ["Date", "Contract", "Event", "Type", "Category", "Amount", "Notes", "Status"]
 
 
 def main() -> int:
