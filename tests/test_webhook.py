@@ -34,9 +34,11 @@ def _bypass_signature_and_stub_sends(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Signature verification (#8) and the outbound confirmation reply are exercised
     by their own dedicated tests; every other POST test asserts row-building, so
-    it should not have to sign a body or hit the send API. Individual tests
-    re-monkeypatch either hook when they are the thing under test.
+    it should not have to sign a body or hit the send API. A configured app
+    secret clears the misconfiguration guard; ``verify_signature`` is stubbed to
+    accept. Individual tests re-monkeypatch either hook when it is under test.
     """
+    monkeypatch.setenv("WHATSAPP_APP_SECRET", "test-app-secret")
     monkeypatch.setattr("src.main.verify_signature", lambda *a, **k: True)
     monkeypatch.setattr("src.main.send_text_message", lambda *a, **k: None)
 
@@ -313,6 +315,21 @@ def test_webhook_post_rejects_an_invalid_signature_without_appending(
 
     assert status == 403
     assert rows == []  # an unauthenticated POST must never write a row
+
+
+def test_webhook_post_returns_500_when_app_secret_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A missing secret is a deploy/config error, not a bad request: it must be a
+    # 5xx (distinct from the 403 a real bad signature gets) and write no row.
+    rows: list[list[str]] = []
+    monkeypatch.setattr("src.main.append_row", lambda row: rows.append(row))
+    monkeypatch.delenv("WHATSAPP_APP_SECRET", raising=False)
+
+    _, status = webhook(FakeRequest("POST", json=text_message_envelope("Cash sale, $200")))  # type: ignore[arg-type]
+
+    assert status == 500
+    assert rows == []
 
 
 def test_webhook_post_verifies_signature_over_the_raw_body_and_app_secret(

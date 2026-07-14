@@ -17,10 +17,7 @@ import os
 
 import requests
 
-# Graph API version pinned to match the rest of the Meta integration (see
-# src.media / docs/STATUS.md "Meta setup"). Bump deliberately, not implicitly.
-_GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
-_TIMEOUT_SECONDS = 30
+from src.graph import GRAPH_API_BASE, TIMEOUT_SECONDS
 
 
 def _access_token() -> str:
@@ -45,9 +42,9 @@ def send_text_message(to: str, body: str, phone_number_id: str) -> None:
         "text": {"body": body},
     }
     response = requests.post(
-        f"{_GRAPH_API_BASE}/{phone_number_id}/messages",
+        f"{GRAPH_API_BASE}/{phone_number_id}/messages",
         headers=headers,
         json=payload,
-        timeout=_TIMEOUT_SECONDS,
+        timeout=TIMEOUT_SECONDS,
     )
     response.raise_for_status()
