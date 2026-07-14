@@ -12,12 +12,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +63,30 @@ _SYSTEM_INSTRUCTION = (
 # arrives. These three states let one flat ledger answer cash-on-hand,
 # money-owed-to-us (receivables), and money-we-owe (payables).
 _ALLOWED_STATUSES = ("Paid", "Owed to us", "Owed by us")
+
+# Bounded retry for TRANSIENT Gemini failures (Issue #33). A 429 (per-minute rate
+# limit) or 503 ("high demand") used to drop the owner's message straight to the
+# raw-text fallback on a temporary blip; a short retry lets most clear on a resend.
+#
+# We own this policy rather than the SDK's: google-genai's tenacity retry is OFF
+# by default (http_options.retry_options=None → stop_after_attempt(1)), so there
+# is no double-waiting to guard against — and its defaults (max_delay 60s, six
+# retryable codes) are far too loose for Meta's webhook ACK budget. Worst-case
+# added wait here is ~0.5s + ~1.0s = ~1.5s (+jitter), well inside that budget, so
+# the webhook still ACKs 200 in time (a non-200 makes Meta retry the delivery).
+#
+# Transient only: 429/503 surface as google.genai.errors.APIError (Client/Server
+# Error) with an int .code; everything else (bad key, 400, non-JSON) falls through
+# to the fallback immediately. We deliberately do NOT honour a `Retry-After`
+# header — a 429 can advertise up to 60s, which we'd have to cap to _RETRY_MAX_DELAY
+# anyway to protect the ACK budget, so bounded exponential backoff is simpler and
+# strictly safer.
+_TRANSIENT_STATUS_CODES = (429, 503)
+_RETRY_MAX_ATTEMPTS = 3  # initial call + up to 2 retries
+_RETRY_INITIAL_DELAY = 0.5  # seconds before the first retry
+_RETRY_EXP_BASE = 2.0  # delay multiplier after each attempt
+_RETRY_MAX_DELAY = 4.0  # per-retry wait cap, keeps the total bounded
+_RETRY_JITTER = 0.25  # add [0, delay * _RETRY_JITTER] to avoid synchronised retries
 
 
 @dataclass(frozen=True)
@@ -141,6 +168,51 @@ def _build_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
+def _generate_with_retry(
+    client: genai.Client,
+    *,
+    model: str,
+    contents: Any,
+    config: types.GenerateContentConfig,
+    sleep: Callable[[float], None] | None = None,
+    uniform: Callable[[float, float], float] | None = None,
+) -> Any:
+    """Call Gemini, retrying only transient (429/503) errors with bounded backoff.
+
+    Non-transient errors (bad key, 400, malformed request) and the final failed
+    attempt re-raise immediately, so the caller falls back to a raw-text row
+    without wasted waiting. Total added latency is capped by the retry constants
+    to stay inside Meta's webhook ACK window.
+
+    ``sleep`` and ``uniform`` default to ``time.sleep`` / ``random.uniform`` and
+    exist to be injected in tests, so the backoff schedule can be observed and
+    made deterministic without patching global modules.
+    """
+    _sleep = time.sleep if sleep is None else sleep
+    _uniform = random.uniform if uniform is None else uniform
+    delay = _RETRY_INITIAL_DELAY
+    attempt = 1
+    # ``while True`` (not ``for``) so ``return``/``raise`` are the only exits and
+    # the control flow is structurally exhaustive — no unreachable trailing raise.
+    while True:
+        try:
+            return client.models.generate_content(model=model, contents=contents, config=config)
+        except errors.APIError as exc:
+            if exc.code not in _TRANSIENT_STATUS_CODES or attempt == _RETRY_MAX_ATTEMPTS:
+                raise
+            wait = delay + _uniform(0.0, delay * _RETRY_JITTER)
+            logger.info(
+                "Gemini transient %s on attempt %d/%d; retrying in %.2fs",
+                exc.code,
+                attempt,
+                _RETRY_MAX_ATTEMPTS,
+                wait,
+            )
+            _sleep(wait)
+            delay = min(delay * _RETRY_EXP_BASE, _RETRY_MAX_DELAY)
+            attempt += 1
+
+
 def _generate_note(contents: Any, raw_text: str, today: date) -> ParsedNote | None:
     """Send ``contents`` to Gemini under the ledger contract and coerce the JSON.
 
@@ -151,7 +223,8 @@ def _generate_note(contents: Any, raw_text: str, today: date) -> ParsedNote | No
     """
     try:
         client = _build_client()
-        response = client.models.generate_content(
+        response = _generate_with_retry(
+            client,
             model=os.environ.get("GEMINI_MODEL", _DEFAULT_MODEL),
             contents=contents,
             config=types.GenerateContentConfig(

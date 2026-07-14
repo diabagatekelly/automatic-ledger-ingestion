@@ -2,8 +2,18 @@ import json
 from datetime import date
 
 import pytest
+from google.genai import errors, types
 
-from src.llm import ParsedNote, _build_client, coerce_note, parse_image, parse_note
+from src.llm import (
+    _RETRY_INITIAL_DELAY,
+    _RETRY_MAX_ATTEMPTS,
+    ParsedNote,
+    _build_client,
+    _generate_with_retry,
+    coerce_note,
+    parse_image,
+    parse_note,
+)
 
 TODAY = date(2026, 7, 13)
 
@@ -28,6 +38,33 @@ class FakeClient:
             raise self._raises
         assert self._text is not None
         return FakeResponse(self._text)
+
+
+class FlakyClient:
+    """generate_content raises each queued exception in turn, then returns text."""
+
+    def __init__(self, failures: list[Exception], text: str) -> None:
+        self._failures = list(failures)
+        self._text = text
+        self.models = self
+        self.calls = 0
+
+    def generate_content(self, **kwargs: object) -> FakeResponse:
+        self.calls += 1
+        if self._failures:
+            raise self._failures.pop(0)
+        return FakeResponse(self._text)
+
+
+def _api_error(code: int) -> errors.APIError:
+    """Build an errors.APIError with a given HTTP status code (503, 429, 400…)."""
+    return errors.APIError(
+        code, {"error": {"code": code, "status": "TRANSIENT", "message": "test"}}
+    )
+
+
+# A minimal but valid Gemini JSON body — coerce_note fills the rest with defaults.
+_VALID_JSON = '{"amount": 200, "type": "Revenue", "category": "Revenue", "confidence": "high"}'
 
 
 # --- coerce_note (pure) ---
@@ -202,6 +239,115 @@ def test_parse_note_returns_none_when_model_returns_non_object_json(
     # Valid JSON that isn't an object (a list) must not become a row.
     monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text="[1, 2, 3]"))
     assert parse_note("Cash sale", TODAY) is None
+
+
+# --- bounded retry on transient (429/503) errors (Issue #33) ---
+#
+# The direct _generate_with_retry tests inject ``sleep``/``uniform`` so the
+# backoff schedule is observable and deterministic without patching global
+# modules; the end-to-end parse_note/parse_image tests prove the retry actually
+# yields a PARSED row (not the raw-text fallback).
+
+
+def _no_jitter(_low: float, _high: float) -> float:
+    """Deterministic stand-in for random.uniform: always the low bound (no jitter)."""
+    return _low
+
+
+def _call_with_retry(
+    client: object, slept: list[float]
+) -> object:  # returns the Gemini response or raises
+    return _generate_with_retry(
+        client,  # type: ignore[arg-type]
+        model="m",
+        contents="x",
+        config=types.GenerateContentConfig(),
+        sleep=slept.append,
+        uniform=_no_jitter,
+    )
+
+
+def test_generate_with_retry_uses_bounded_exponential_backoff() -> None:
+    # Two transient failures then success → the response, with a deterministic
+    # 0.5s, 1.0s (initial × exp_base) backoff and no jitter.
+    slept: list[float] = []
+    client = FlakyClient([_api_error(503), _api_error(429)], _VALID_JSON)
+
+    response = _call_with_retry(client, slept)
+
+    assert response.text == _VALID_JSON  # type: ignore[attr-defined]
+    assert client.calls == 3
+    assert slept == [_RETRY_INITIAL_DELAY, _RETRY_INITIAL_DELAY * 2]
+
+
+def test_generate_with_retry_does_not_retry_non_transient_error() -> None:
+    # A non-transient error (400) re-raises immediately — no wasted retries/sleeps.
+    slept: list[float] = []
+    client = FlakyClient([_api_error(400)], _VALID_JSON)
+
+    with pytest.raises(errors.APIError) as excinfo:
+        _call_with_retry(client, slept)
+
+    assert excinfo.value.code == 400
+    assert client.calls == 1
+    assert slept == []
+
+
+def test_generate_with_retry_reraises_after_exhausting_attempts() -> None:
+    # Persistent 503 → all attempts used, then the last error propagates (so
+    # _generate_note falls back to a raw-text row).
+    slept: list[float] = []
+    client = FlakyClient([_api_error(503)] * _RETRY_MAX_ATTEMPTS, _VALID_JSON)
+
+    with pytest.raises(errors.APIError) as excinfo:
+        _call_with_retry(client, slept)
+
+    assert excinfo.value.code == 503
+    assert client.calls == _RETRY_MAX_ATTEMPTS
+    assert len(slept) == _RETRY_MAX_ATTEMPTS - 1  # one wait between each attempt
+
+
+@pytest.mark.parametrize("code", [503, 429])
+def test_parse_note_retries_transient_error_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    # End-to-end: a transient 503/429 that clears on a later attempt yields a
+    # PARSED row, not the raw-text fallback.
+    monkeypatch.setattr("src.llm.time.sleep", lambda _s: None)
+    client = FlakyClient([_api_error(code), _api_error(code)], _VALID_JSON)
+    monkeypatch.setattr("src.llm._build_client", lambda: client)
+
+    note = parse_note("Cash sale, 200", TODAY)
+
+    assert note is not None
+    assert note.amount == "200"
+    assert client.calls == 3  # 2 transient failures, then success
+
+
+def test_parse_note_falls_back_after_exhausting_transient_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # End-to-end: persistent 503 → attempts exhausted → the raw-text fallback.
+    monkeypatch.setattr("src.llm.time.sleep", lambda _s: None)
+    client = FlakyClient([_api_error(503)] * _RETRY_MAX_ATTEMPTS, _VALID_JSON)
+    monkeypatch.setattr("src.llm._build_client", lambda: client)
+
+    assert parse_note("busy", TODAY) is None
+    assert client.calls == _RETRY_MAX_ATTEMPTS
+
+
+def test_parse_image_retries_transient_error_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The retry lives in the shared _generate_note, so the image path benefits too.
+    monkeypatch.setattr("src.llm.time.sleep", lambda _s: None)
+    client = FlakyClient([_api_error(503)], _VALID_JSON)
+    monkeypatch.setattr("src.llm._build_client", lambda: client)
+
+    note = parse_image(b"\x89PNG", "image/png", TODAY, caption="receipt")
+
+    assert note is not None
+    assert client.calls == 2
 
 
 # --- parse_image (multimodal Gemini adapter, mocked client) ---
