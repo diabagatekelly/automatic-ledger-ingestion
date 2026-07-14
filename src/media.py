@@ -17,10 +17,7 @@ import os
 
 import requests
 
-# Graph API version pinned to match the rest of the Meta integration (see
-# docs/STATUS.md "Meta setup"). Bump deliberately, not implicitly.
-_GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
-_TIMEOUT_SECONDS = 30
+from src.graph import GRAPH_API_BASE, TIMEOUT_SECONDS
 
 
 def _access_token() -> str:
@@ -41,7 +38,7 @@ def download_media(media_id: str) -> tuple[bytes, str]:
     headers = {"Authorization": f"Bearer {_access_token()}"}
 
     metadata_response = requests.get(
-        f"{_GRAPH_API_BASE}/{media_id}", headers=headers, timeout=_TIMEOUT_SECONDS
+        f"{GRAPH_API_BASE}/{media_id}", headers=headers, timeout=TIMEOUT_SECONDS
     )
     metadata_response.raise_for_status()
     metadata = metadata_response.json()
@@ -51,6 +48,6 @@ def download_media(media_id: str) -> tuple[bytes, str]:
         raise RuntimeError(f"media {media_id} metadata has no download URL")
     mime_type = metadata.get("mime_type") or "application/octet-stream"
 
-    binary_response = requests.get(url, headers=headers, timeout=_TIMEOUT_SECONDS)
+    binary_response = requests.get(url, headers=headers, timeout=TIMEOUT_SECONDS)
     binary_response.raise_for_status()
     return binary_response.content, mime_type

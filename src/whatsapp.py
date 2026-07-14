@@ -12,11 +12,19 @@ callbacks arrive on the same webhook but under ``value.statuses`` (no
 image references to persist; everything else yields nothing so the caller can
 simply ACK.
 
+It also owns two adjacent pure concerns on the same webhook contract:
+``verify_signature`` (the ``X-Hub-Signature-256`` HMAC that authenticates an
+inbound POST, #8) and the reply helpers ``extract_reply_context`` /
+``build_confirmation`` (who to reply to + what to say, #8). The network send of
+that reply is the one piece of I/O and lives in ``src.messaging``.
+
 Pure and I/O-free, so it is unit-tested directly.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from dataclasses import dataclass
 from typing import Any
 
@@ -96,3 +104,73 @@ def extract_image_messages(payload: dict[str, Any]) -> list[InboundImage]:
                     )
                 )
     return images
+
+
+def verify_signature(raw_body: bytes, signature_header: str | None, app_secret: str | None) -> bool:
+    """Validate Meta's ``X-Hub-Signature-256`` header against the app secret.
+
+    Meta signs each webhook POST with ``sha256=<hex>`` where ``<hex>`` is the
+    HMAC-SHA256 of the *raw request body* keyed by the WhatsApp app secret. The
+    body must be the exact received bytes — re-serializing the parsed JSON would
+    change the digest. Comparison is constant-time to avoid a timing side channel.
+
+    Fails **closed**: a missing/empty secret, a missing header, or a header
+    without the ``sha256=`` prefix all return ``False`` so an unsigned or
+    unverifiable POST is rejected rather than trusted.
+    """
+    if not app_secret:
+        return False
+    if not signature_header or not signature_header.startswith("sha256="):
+        return False
+    received = signature_header[len("sha256=") :]
+    expected = hmac.new(app_secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, received)
+
+
+def extract_reply_context(payload: dict[str, Any]) -> tuple[str, str] | None:
+    """Return ``(sender, phone_number_id)`` for replying to the inbound message.
+
+    The confirmation reply goes back to the message's ``from`` via *our* business
+    number, whose id is on the same ``value.metadata.phone_number_id``. Returns
+    the first message that carries both; ``None`` for status callbacks or
+    off-spec payloads (no reply is sent, but the row is still appended).
+    """
+    if not isinstance(payload, dict):
+        return None
+    for entry in _dicts(payload.get("entry")):
+        for change in _dicts(entry.get("changes")):
+            value = change.get("value")
+            if not isinstance(value, dict):
+                continue
+            metadata = value.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            phone_number_id = metadata.get("phone_number_id")
+            if not isinstance(phone_number_id, str) or not phone_number_id:
+                continue
+            for message in _dicts(value.get("messages")):
+                sender = message.get("from")
+                if isinstance(sender, str) and sender:
+                    return (sender, phone_number_id)
+    return None
+
+
+def build_confirmation(row: list[str]) -> str:
+    """Compose the short WhatsApp confirmation for an appended ledger row.
+
+    Row columns: Date | Contract | Event | Type | Category | Amount | Notes |
+    Status. A cleanly parsed row reads e.g. ``✅ Logged: Revenue 200 — Diallo
+    wedding (Paid)`` (the most specific of event/contract/notes as the label). A
+    fallback/raw row (no Type or Amount) instead flags that it wasn't read
+    cleanly, so the owner knows to fix it by hand — silence never happens.
+    """
+    date, contract, event, type_, category, amount, notes, status = (row + [""] * 8)[:8]
+    if not type_ and not amount:
+        return f"⚠️ Couldn't read that clearly — logged the raw text: {notes}"
+    label = event or contract or notes
+    message = f"✅ Logged: {type_} {amount}".rstrip()
+    if label:
+        message += f" — {label}"
+    if status:
+        message += f" ({status})"
+    return message

@@ -14,9 +14,12 @@ name: Deploy
 #   SHEET_ID          target spreadsheet id
 # Runtime secrets in Secret Manager (NOT repo secrets), mounted as env vars:
 #   whatsapp-verify-token -> WHATSAPP_VERIFY_TOKEN
-#   whatsapp-access-token -> WHATSAPP_ACCESS_TOKEN  (media download for #5)
+#   whatsapp-access-token -> WHATSAPP_ACCESS_TOKEN  (media download #5 + reply #8)
+#   whatsapp-app-secret   -> WHATSAPP_APP_SECRET    (X-Hub-Signature-256 HMAC, #8)
 #   gemini-api-key        -> GEMINI_API_KEY
-# All of the above are provisioned by scripts/provision-gcp-wif.sh.
+# All of the above are provisioned by scripts/provision-gcp-wif.sh. A newly-added
+# secret MUST exist before this workflow runs, or the deploy fails "Permission
+# denied on secret" — provision it before merging the slice that mounts it.
 
 on:
   push:
@@ -69,7 +72,7 @@ jobs:
             --memory=512Mi \
             --service-account="${{ secrets.GCP_RUNTIME_SA }}" \
             --set-env-vars=SHEET_ID="${{ secrets.SHEET_ID }}" \
-            --set-secrets=WHATSAPP_VERIFY_TOKEN=whatsapp-verify-token:latest,WHATSAPP_ACCESS_TOKEN=whatsapp-access-token:latest,GEMINI_API_KEY=gemini-api-key:latest
+            --set-secrets=WHATSAPP_VERIFY_TOKEN=whatsapp-verify-token:latest,WHATSAPP_ACCESS_TOKEN=whatsapp-access-token:latest,WHATSAPP_APP_SECRET=whatsapp-app-secret:latest,GEMINI_API_KEY=gemini-api-key:latest
 
       - name: Smoke test — deployed handler answers
         run: |
