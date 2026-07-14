@@ -81,10 +81,13 @@ def test_coerce_note_defaults_missing_fields() -> None:
 
 
 def test_coerce_note_normalizes_and_defaults_status() -> None:
-    # Case-insensitive match to the allowed set; anything off-list → "Paid",
-    # so the Sheet's cash/receivable/payable math never sees a stray value.
+    # Case-insensitive AND whitespace-insensitive match to the allowed set
+    # (_as_text strips); anything off-list → "Paid", so the Sheet's
+    # cash/receivable/payable math never sees a stray value.
     assert coerce_note({"status": "owed to us"}, raw_text="x", today=TODAY).status == "Owed to us"
     assert coerce_note({"status": "OWED BY US"}, raw_text="x", today=TODAY).status == "Owed by us"
+    padded = coerce_note({"status": "  Owed to us  "}, raw_text="x", today=TODAY)
+    assert padded.status == "Owed to us"
     assert coerce_note({"status": "later maybe"}, raw_text="x", today=TODAY).status == "Paid"
 
 

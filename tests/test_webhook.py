@@ -87,6 +87,46 @@ def test_webhook_post_appends_parsed_row_from_whatsapp_text(
     ]
 
 
+def test_webhook_post_appends_event_and_status_columns_from_parsed_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A credit sale: a non-default event AND status must survive the full
+    # webhook → build_row_from_note path and land in columns 2 (Event) and 7
+    # (Status), guarding against either being dropped or mis-ordered.
+    from src.llm import ParsedNote
+
+    rows: list[list[str]] = []
+    monkeypatch.setattr("src.main.append_row", lambda row: rows.append(row))
+    parsed = ParsedNote(
+        date="2026-07-13",
+        contract_name="Diallo",
+        event="Diallo wedding",
+        category="Revenue",
+        type="Revenue",
+        amount="200",
+        notes="Wedding deposit on credit",
+        confidence="high",
+        status="Owed to us",
+    )
+    monkeypatch.setattr("src.main.parse_note", lambda text, today: parsed)
+
+    _, status = webhook(FakeRequest("POST", json=text_message_envelope("Diallo wedding, owes 200")))  # type: ignore[arg-type]
+
+    assert status == 200
+    assert rows == [
+        [
+            "2026-07-13",
+            "Diallo",
+            "Diallo wedding",
+            "Revenue",
+            "Revenue",
+            "200",
+            "Wedding deposit on credit",
+            "Owed to us",
+        ]
+    ]
+
+
 def test_webhook_post_falls_back_to_raw_text_row_when_parse_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
