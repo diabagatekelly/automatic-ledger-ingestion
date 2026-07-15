@@ -5,7 +5,24 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.llm import ParsedNote
-from src.sheets import append_row, build_row, build_row_from_note
+from src.sheets import NEEDS_REVIEW, append_row, build_row, build_row_from_note
+
+
+def _note(**overrides: str) -> ParsedNote:
+    """A clean, fully-populated note; override just the field under test."""
+    base = {
+        "date": "2026-07-13",
+        "contract_name": "Diallo",
+        "event": "Diallo wedding",
+        "category": "Ingredients",
+        "type": "Expense",
+        "amount": "200",
+        "notes": "Meat for the wedding",
+        "confidence": "high",
+        "status": "Paid",
+    }
+    return ParsedNote(**{**base, **overrides})  # type: ignore[arg-type]
+
 
 # --- build_row (pure) ---
 
@@ -20,6 +37,85 @@ def test_build_row_places_date_and_notes_leaving_middle_blank() -> None:
 def test_build_row_defuses_leading_formula_in_notes() -> None:
     row = build_row("=IMPORTXML(evil)", date(2026, 7, 11))
     assert row[6] == "'=IMPORTXML(evil)"
+
+
+# --- NEEDS_REVIEW flagging (Issue #9) ---
+#
+# Two-tier rule (decided 2026-07-15). The Sheet flag follows ARCHITECTURE.md's
+# "on low confidence, the row is flagged NEEDS_REVIEW rather than guessed", and a
+# blank Amount flags too — a row with no number is unusable whatever the model
+# claims about itself. The tiers differ only in the REPLY (see test_whatsapp):
+# a blank Amount asks the owner to clarify; low-confidence-with-an-amount does not,
+# because a live smoke run showed a correct row scoring low (see issue #9).
+
+
+def test_build_row_from_note_flags_low_confidence_in_notes() -> None:
+    row = build_row_from_note(_note(confidence="low"))
+    assert row[6] == f"{NEEDS_REVIEW} — Meat for the wedding"
+
+
+def test_build_row_from_note_flags_blank_amount_even_when_confident() -> None:
+    # The model can be sure it found no amount. Still unusable.
+    row = build_row_from_note(_note(amount="", confidence="high"))
+    assert row[6].startswith(NEEDS_REVIEW)
+
+
+def test_build_row_from_note_flags_whitespace_only_amount() -> None:
+    row = build_row_from_note(_note(amount="   ", confidence="high"))
+    assert row[6].startswith(NEEDS_REVIEW)
+
+
+@pytest.mark.parametrize("amount", ["0", "0.0", "0.00", " 0 "])
+def test_build_row_from_note_flags_a_zero_amount(amount: str) -> None:
+    # Gemini does NOT reliably leave amount empty when it can't find one — a live
+    # run on the contentless text "Recu paiement" returned amount=0 despite the
+    # system instruction saying never to invent one. A zero-value catering entry
+    # is meaningless, so treat it as no amount at all rather than trusting the
+    # model to have obeyed. This is the exact case #9 exists to catch.
+    row = build_row_from_note(_note(amount=amount, confidence="high"))
+    assert row[6].startswith(NEEDS_REVIEW)
+
+
+@pytest.mark.parametrize("amount", ["abc", "N/A", "-"])
+def test_build_row_from_note_flags_an_unparseable_amount(amount: str) -> None:
+    # coerce_note keeps a non-numeric string verbatim; it can't be a ledger amount.
+    row = build_row_from_note(_note(amount=amount, confidence="high"))
+    assert row[6].startswith(NEEDS_REVIEW)
+
+
+@pytest.mark.parametrize("amount", ["200", "200.50", "0.01"])
+def test_build_row_from_note_does_not_flag_a_real_amount(amount: str) -> None:
+    row = build_row_from_note(_note(amount=amount, confidence="high"))
+    assert NEEDS_REVIEW not in row[6]
+
+
+def test_build_row_from_note_does_not_flag_a_clean_row() -> None:
+    row = build_row_from_note(_note())
+    assert NEEDS_REVIEW not in row[6]
+    assert row[6] == "Meat for the wedding"
+
+
+def test_build_row_from_note_flags_with_no_notes_text() -> None:
+    # No trailing separator when there's nothing to append it to.
+    row = build_row_from_note(_note(notes="", confidence="low"))
+    assert row[6] == NEEDS_REVIEW
+
+
+def test_build_row_from_note_flag_does_not_defeat_formula_defusing() -> None:
+    # The marker must not become a vehicle for injection: prefixing moves the
+    # trigger off the front of the cell, which is exactly what makes it inert —
+    # Sheets only evaluates a cell that STARTS with a trigger.
+    row = build_row_from_note(_note(notes="=IMPORTXML(evil)", confidence="low"))
+    assert row[6] == f"{NEEDS_REVIEW} — =IMPORTXML(evil)"
+    assert not row[6].startswith(("=", "+", "-", "@"))
+
+
+def test_build_row_from_note_flag_leaves_other_columns_untouched() -> None:
+    # The flag rides in Notes only — Status carries the payment lifecycle and
+    # Tab B's SUMIFS depend on it, so it must never be repurposed.
+    row = build_row_from_note(_note(confidence="low"))
+    assert row[7] == "Paid"
+    assert row[5] == "200"
 
 
 # --- build_row_from_note (pure) ---

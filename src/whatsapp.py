@@ -28,6 +28,8 @@ import hmac
 from dataclasses import dataclass
 from typing import Any
 
+from src.sheets import NEEDS_REVIEW, has_usable_amount
+
 
 @dataclass(frozen=True)
 class InboundImage:
@@ -155,6 +157,18 @@ def extract_reply_context(payload: dict[str, Any]) -> tuple[str, str] | None:
     return None
 
 
+def _strip_review_marker(notes: str) -> str:
+    """Drop the internal NEEDS_REVIEW marker from a Notes cell for display.
+
+    The marker is a Sheet-side signal for the owner's review pass; it is noise in
+    a WhatsApp reply and must never leak into one.
+    """
+    if notes == NEEDS_REVIEW:
+        return ""
+    prefix = f"{NEEDS_REVIEW} — "
+    return notes[len(prefix) :] if notes.startswith(prefix) else notes
+
+
 def build_confirmation(row: list[str]) -> str:
     """Compose the short WhatsApp confirmation for an appended ledger row.
 
@@ -163,10 +177,27 @@ def build_confirmation(row: list[str]) -> str:
     wedding (Paid)`` (the most specific of event/contract/notes as the label). A
     fallback/raw row (no Type or Amount) instead flags that it wasn't read
     cleanly, so the owner knows to fix it by hand — silence never happens.
+
+    The owner is asked to clarify ONLY when the row has no Amount — a row with no
+    number is unusable. A row flagged NEEDS_REVIEW merely for low confidence gets
+    the ordinary reply: a live smoke run showed a complete, correct row scoring
+    low, so pestering her about those would train her to ignore the flag (#9).
     """
     date, contract, event, type_, category, amount, notes, status = (row + [""] * 8)[:8]
+    notes = _strip_review_marker(notes)
     if not type_ and not amount:
         return f"⚠️ Couldn't read that clearly — logged the raw text: {notes}"
+    if not has_usable_amount(amount):
+        # Parsed enough to have a Type, but no usable number landed — the mat /
+        # blurry receipt / contentless-text case. Note this catches a literal "0"
+        # too: the model invents one rather than leaving the field empty (live:
+        # "Recu paiement" → amount=0), and "✅ Logged: Revenue 0" would read as a
+        # clean success. Name the missing piece so she knows exactly what to send
+        # rather than guessing what went wrong. An uncaptioned unreadable image
+        # leaves nothing to quote back, so the detail is conditional rather than
+        # a dangling colon.
+        detail = f": {notes}" if notes else ""
+        return f"⚠️ Couldn't find an amount — logged it for review{detail}"
     label = event or contract or notes
     message = f"✅ Logged: {type_} {amount}".rstrip()
     if label:

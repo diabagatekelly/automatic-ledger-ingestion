@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 
+from src.sheets import NEEDS_REVIEW
 from src.whatsapp import (
     InboundImage,
     build_confirmation,
@@ -230,3 +231,81 @@ def test_build_confirmation_flags_a_raw_fallback_row() -> None:
     message = build_confirmation(row)
     assert "Cash sale, $200" in message
     assert "✅" not in message  # not a clean success
+
+
+# --- the two-tier reply (Issue #9) ---
+#
+# Both tiers carry NEEDS_REVIEW in the Sheet; only a blank Amount earns a reply
+# asking the owner to clarify. Low-confidence-WITH-an-amount gets the normal
+# reply on purpose: a live smoke run produced a complete, correct row that scored
+# low confidence, so asking her to re-send it would be a false positive — and a
+# flag she learns to ignore is worse than no flag (see issue #9).
+
+
+def test_build_confirmation_asks_for_clarification_when_amount_is_blank() -> None:
+    # Parsed enough to have a Type, but no number — nothing usable landed.
+    row = ["2026-07-13", "", "Wedding", "Revenue", "Revenue", "", f"{NEEDS_REVIEW} — Recu", "Paid"]
+    message = build_confirmation(row)
+    assert "✅" not in message
+    assert NEEDS_REVIEW not in message  # internal marker, not owner-facing
+
+
+def test_build_confirmation_asks_for_clarification_when_amount_is_zero() -> None:
+    # Live case: "Recu paiement" → Gemini returned amount=0, not blank. Without
+    # this she'd get "✅ Logged: Revenue 0 — Recu paiement (Paid)": a confident
+    # success carrying an invented number.
+    notes = f"{NEEDS_REVIEW} — Recu paiement"
+    row = ["2026-07-15", "", "", "Revenue", "Revenue", "0", notes, "Paid"]
+    message = build_confirmation(row)
+    assert "✅" not in message
+    assert "amount" in message.lower()
+    assert "Recu paiement" in message
+    assert NEEDS_REVIEW not in message
+
+
+def test_build_confirmation_is_normal_for_low_confidence_with_an_amount() -> None:
+    # The wedding-cake case: scored low, but the row is complete and correct.
+    # She gets the ordinary confirmation; the flag is a quiet Sheet-side signal.
+    row = [
+        "2026-07-15",
+        "",
+        "Wedding Cake",
+        "Revenue",
+        "Revenue",
+        "200",
+        f"{NEEDS_REVIEW} — Cash sale for wedding cake",
+        "Paid",
+    ]
+    message = build_confirmation(row)
+    assert message.startswith("✅")
+    assert "200" in message
+    assert "Wedding Cake" in message
+    assert NEEDS_REVIEW not in message
+
+
+def test_build_confirmation_strips_the_marker_when_notes_is_the_label() -> None:
+    # With no event/contract the label falls back to Notes — which carries the
+    # marker. The owner must never see the internal token.
+    row = ["2026-07-15", "", "", "Revenue", "Revenue", "200", f"{NEEDS_REVIEW} — Cash sale", "Paid"]
+    message = build_confirmation(row)
+    assert "Cash sale" in message
+    assert NEEDS_REVIEW not in message
+
+
+def test_build_confirmation_strips_a_bare_marker() -> None:
+    # An uncaptioned image Gemini couldn't read: coerce_note leaves notes empty
+    # (raw_text is ""), so the whole cell is just the marker.
+    row = ["2026-07-15", "", "Wedding", "Revenue", "Revenue", "200", NEEDS_REVIEW, "Paid"]
+    message = build_confirmation(row)
+    assert message.startswith("✅")
+    assert NEEDS_REVIEW not in message
+
+
+def test_build_confirmation_has_no_dangling_colon_when_no_notes_to_quote() -> None:
+    # Blank amount AND no notes text — don't send her "...for review: " with
+    # nothing after it.
+    row = ["2026-07-15", "", "", "Revenue", "Revenue", "", NEEDS_REVIEW, "Paid"]
+    message = build_confirmation(row)
+    assert NEEDS_REVIEW not in message
+    assert not message.rstrip().endswith(":")
+    assert "amount" in message.lower()
