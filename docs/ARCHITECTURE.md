@@ -11,8 +11,20 @@
    chosen over full Flash for higher free-tier quota / less throttling) converts
    the unstructured input into structured JSON against the fixed schema below. On
    low confidence, the row is flagged `NEEDS_REVIEW` rather than guessed.
+   **A blank `amount` flags too** — a ledger row with no number is unusable
+   however sure the model is, and it's what a non-receipt photo or a contentless
+   text actually produces. The marker is prefixed to `Source/Notes` (never
+   `Status`, which Tab B's `SUMIFS` read).
 5. **Persist** — the row is appended to Tab A ("All Transactions").
 6. **Confirm** — a human-readable reply is sent back (free, inside the 24h window).
+   Only a **blank `amount`** earns a reply asking the owner to clarify. A row
+   flagged merely for low confidence gets the ordinary `✅ Logged: …` reply, on
+   purpose: a live smoke run (2026-07-15) returned a *complete, correct* row
+   scoring `low` while a sparser row scored `high`, so `confidence` means "the
+   model thinks it guessed", **not** "this row is junk". Every junk row is
+   low-confidence, but not every low-confidence row is junk — asking her to
+   re-send correct messages would train her to ignore the flag. The `NEEDS_REVIEW`
+   marker is internal and is stripped before any reply.
 
 ## LLM output schema (the contract every slice reuses)
 
