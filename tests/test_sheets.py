@@ -5,7 +5,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.llm import ParsedNote
-from src.sheets import NEEDS_REVIEW, append_row, build_row, build_row_from_note
+from src.sheets import (
+    NEEDS_REVIEW,
+    _mark_for_review,
+    append_row,
+    build_row,
+    build_row_from_note,
+    strip_review_marker,
+)
 
 
 def _note(**overrides: str) -> ParsedNote:
@@ -87,6 +94,18 @@ def test_build_row_from_note_flags_an_unparseable_amount(amount: str) -> None:
 def test_build_row_from_note_does_not_flag_a_real_amount(amount: str) -> None:
     row = build_row_from_note(_note(amount=amount, confidence="high"))
     assert NEEDS_REVIEW not in row[6]
+
+
+@pytest.mark.parametrize("notes", ["Cash sale", "", "=IMPORTXML(evil)", "NEEDS_REVIEW literal"])
+def test_review_marker_round_trips(notes: str) -> None:
+    # The real guard against marking and stripping drifting apart: they share a
+    # separator, and if one side's spelling changed the owner would silently start
+    # seeing "NEEDS_REVIEW — " in her replies. Whatever we mark, we can unmark.
+    assert strip_review_marker(_mark_for_review(notes)) == notes
+
+
+def test_strip_review_marker_leaves_unmarked_notes_alone() -> None:
+    assert strip_review_marker("Cash sale") == "Cash sale"
 
 
 def test_build_row_from_note_does_not_flag_a_clean_row() -> None:

@@ -28,7 +28,7 @@ import hmac
 from dataclasses import dataclass
 from typing import Any
 
-from src.sheets import NEEDS_REVIEW, has_usable_amount
+from src.sheets import has_usable_amount, strip_review_marker
 
 
 @dataclass(frozen=True)
@@ -157,18 +157,6 @@ def extract_reply_context(payload: dict[str, Any]) -> tuple[str, str] | None:
     return None
 
 
-def _strip_review_marker(notes: str) -> str:
-    """Drop the internal NEEDS_REVIEW marker from a Notes cell for display.
-
-    The marker is a Sheet-side signal for the owner's review pass; it is noise in
-    a WhatsApp reply and must never leak into one.
-    """
-    if notes == NEEDS_REVIEW:
-        return ""
-    prefix = f"{NEEDS_REVIEW} — "
-    return notes[len(prefix) :] if notes.startswith(prefix) else notes
-
-
 def build_confirmation(row: list[str]) -> str:
     """Compose the short WhatsApp confirmation for an appended ledger row.
 
@@ -184,7 +172,7 @@ def build_confirmation(row: list[str]) -> str:
     low, so pestering her about those would train her to ignore the flag (#9).
     """
     date, contract, event, type_, category, amount, notes, status = (row + [""] * 8)[:8]
-    notes = _strip_review_marker(notes)
+    notes = strip_review_marker(notes)
     if not type_ and not amount:
         return f"⚠️ Couldn't read that clearly — logged the raw text: {notes}"
     if not has_usable_amount(amount):

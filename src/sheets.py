@@ -21,12 +21,32 @@ _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _FORMULA_TRIGGERS = ("=", "+", "-", "@")
 
 # Marker prefixed to the Source/Notes cell of a row the owner should eyeball
-# (Issue #9). Part of the row contract, so it lives here with build_row_from_note
-# and is imported (not re-spelled) by whatsapp.build_confirmation, which strips it
-# before the owner ever sees it — two spellings of this string would silently stop
-# matching. Notes and NOT Status: Status carries the payment lifecycle that Tab B's
+# (Issue #9). Notes and NOT Status: Status carries the payment lifecycle that Tab B's
 # SUMIFS read, so repurposing it would corrupt the cash/receivable/payable math.
 NEEDS_REVIEW = "NEEDS_REVIEW"
+_REVIEW_SEPARATOR = " — "
+
+
+def _mark_for_review(notes: str) -> str:
+    """Prefix the review marker onto a Notes cell (inverse of strip_review_marker)."""
+    return f"{NEEDS_REVIEW}{_REVIEW_SEPARATOR}{notes}" if notes else NEEDS_REVIEW
+
+
+def strip_review_marker(notes: str) -> str:
+    """Remove the review marker from a Notes cell, for display back to the owner.
+
+    Lives here, beside ``_mark_for_review``, because the two are inverses and must
+    agree on the exact prefix — including the separator. Splitting them across
+    modules (the marker here, the separator re-spelled in the WhatsApp adapter)
+    would let a change to one silently stop matching the other, and the failure
+    would be invisible: the owner would just start seeing "NEEDS_REVIEW — " in her
+    replies. ``whatsapp.build_confirmation`` imports this rather than reimplementing
+    it. The round-trip is pinned by a test.
+    """
+    if notes == NEEDS_REVIEW:
+        return ""
+    prefix = f"{NEEDS_REVIEW}{_REVIEW_SEPARATOR}"
+    return notes[len(prefix) :] if notes.startswith(prefix) else notes
 
 
 def _defuse_formula(text: str) -> str:
@@ -104,10 +124,10 @@ def build_row_from_note(note: ParsedNote) -> list[str]:
     """
     notes = note.notes
     if _needs_review(note):
-        # Prefix, then defuse the WHOLE cell: a marked "=IMPORTXML(evil)" is
-        # inert precisely because the trigger no longer starts the cell, and
-        # defusing first would leave a stray apostrophe mid-string.
-        notes = f"{NEEDS_REVIEW} — {notes}" if notes else NEEDS_REVIEW
+        # Mark, then defuse the WHOLE cell: a marked "=IMPORTXML(evil)" is inert
+        # precisely because the trigger no longer starts the cell, and defusing
+        # first would leave a stray apostrophe mid-string.
+        notes = _mark_for_review(notes)
     return [
         _defuse_formula(note.date),
         _defuse_formula(note.contract_name),
