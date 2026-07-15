@@ -38,10 +38,25 @@ log a `fallback`. Gemini is asked for JSON and dutifully returns well-formed JSO
 with empty fields and `confidence: "low"`, which is a **`success`** by this metric
 and a junk row in the Sheet.
 
-**`confidence` is the field that exposes that** (#9). A `success` with
-`confidence="low"` means "Gemini answered, but couldn't actually find a ledger entry" —
-count those, not just fallbacks. `confidence` is the *coerced* value (the one that
-lands in the row), so the logs and the Sheet can't disagree.
+**`confidence` is the field that exposes that** (#9) — but read it for what it
+actually is. It is the *model's own* judgement that it had to guess at something, and
+it is **noisier than it looks**:
+
+> Live smoke run, 2026-07-15 (n=3, real Gemini): `"Cash sale, $200, Wedding Cake"` →
+> a complete, correct row (Amount 200, Type Revenue, Event "Wedding Cake", Paid) that
+> scored **`low`**. `"Paid Amina 150 for kitchen help today"` → a row with *both*
+> Contract and Event empty scored **`high`**. The better row scored worse.
+
+So `confidence="low"` means **"the model thinks it guessed"**, *not* "this row is
+junk". Every junk row should be low-confidence, but **not every low-confidence row is
+junk** — the implication runs one way only. Treat `gemini_low_confidence` as a
+*screening* signal whose rate is expected to be non-trivial even on a healthy ledger,
+and establish a baseline before reading anything into it. The stronger junk signal is a
+**blank `amount`**: a row with no number in it is unusable no matter what the model
+claims about its own confidence.
+
+`confidence` is the *coerced* value (the one that lands in the row), so the logs and
+the Sheet can't disagree.
 
 So don't test the telemetry by sending a bad photo — you'll get a `success` line, just
 a low-confidence one. Fallbacks are **rare by design** (a real 429/503 after retries,
@@ -68,8 +83,9 @@ group by `jsonPayload.reason` (the "Analyze" / field breakdown panel), or:
 jsonPayload.event="gemini_parse" AND jsonPayload.outcome="fallback"
 ```
 
-**Junk rows the owner will have to fix by hand** — parses that "succeeded" without
-finding a real ledger entry. This is the query for "is the aunt getting garbage rows":
+**Low-confidence successes** — parses where the model thinks it guessed. A screening
+signal for junk rows, not a junk-row count (see the caveat above; some are perfectly
+good rows):
 
 ```
 jsonPayload.event="gemini_parse" AND jsonPayload.confidence="low"
@@ -93,7 +109,7 @@ Three counter metrics, giving two independent rates over `gemini_parse_total`:
 | rate | numerator | what it tells you |
 |------|-----------|-------------------|
 | **fallback rate** | `gemini_parse_fallbacks` | how often Gemini *failed* → drives #33's durable-queue go/no-go |
-| **low-confidence rate** | `gemini_low_confidence` | how often Gemini *succeeded but found nothing usable* → drives #9's `NEEDS_REVIEW` work |
+| **low-confidence rate** | `gemini_low_confidence` | how often Gemini *thinks it guessed* → screening signal for #9's `NEEDS_REVIEW` work; expect a non-trivial baseline, see the caveat above |
 
 They're plain, verified `gcloud` counters (no label-extractor gymnastics); the
 per-`reason` split is read from `jsonPayload.reason` in Logs Explorer (above) or by
@@ -116,10 +132,10 @@ gcloud logging metrics create gemini_parse_fallbacks \
     AND resource.labels.service_name="catering-ledger-webhook"
     AND jsonPayload.event="gemini_parse" AND jsonPayload.outcome="fallback"'
 
-# Low-confidence successes — the junk rows (#9)
+# Low-confidence successes — screening signal for junk rows (#9)
 gcloud logging metrics create gemini_low_confidence \
   --project=catering-ledger \
-  --description="Parses that succeeded but found no usable ledger entry" \
+  --description="Parses where Gemini reported low confidence (screening signal, not a junk count)" \
   --log-filter='resource.type="cloud_run_revision"
     AND resource.labels.service_name="catering-ledger-webhook"
     AND jsonPayload.event="gemini_parse" AND jsonPayload.confidence="low"'
