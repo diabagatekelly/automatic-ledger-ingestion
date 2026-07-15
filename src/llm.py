@@ -102,6 +102,19 @@ _REASON_BAD_REQUEST_400 = "bad_request_400"
 _REASON_OTHER = "other"
 _TRANSIENT_REASONS = (_REASON_TRANSIENT_429, _REASON_TRANSIENT_503)
 
+# ``outcome`` is three-state (#9). ``success`` means a CLEAN row landed —
+# ``needs_review`` means one landed but wants the owner's eye, and ``fallback``
+# means the parse failed and the row is raw text. Two states conflated the first
+# two: a photo of a mat and a real receipt both logged plain "success", so the
+# dashboards stayed green while the ledger filled with junk.
+_OUTCOME_SUCCESS = "success"
+_OUTCOME_NEEDS_REVIEW = "needs_review"
+_OUTCOME_FALLBACK = "fallback"
+
+# Why a row needs review. See review_reason for why the precedence matters.
+_REVIEW_NO_AMOUNT = "no_amount"
+_REVIEW_LOW_CONFIDENCE = "low_confidence"
+
 
 class MissingAPIKeyError(RuntimeError):
     """Raised when ``GEMINI_API_KEY`` is unset — a config error, typed so the
@@ -154,18 +167,21 @@ def _log_parse_outcome(
     ``reason``/``confidence``) — no logging library or external service needed. A
     Cloud Monitoring log-based metric counts these; see docs/OBSERVABILITY.md.
 
-    ``confidence`` is set on ``success`` only, and is the reason a ``success``
-    line is worth reading (#9): ``outcome`` reports whether Gemini *answered*,
-    not whether the answer was usable. A blurry receipt or a non-receipt photo
-    returns schema-valid JSON with empty fields and ``confidence="low"`` — a
-    success by this metric, a junk row in the Sheet. Counting low-confidence
-    successes is what makes that visible. Omitted on ``fallback``: no note was
-    produced, so there is no confidence to report and guessing one would be a lie.
+    ``outcome`` is three-state (#9): ``success`` (clean row), ``needs_review``
+    (row landed but wants the owner's eye) or ``fallback`` (parse failed, raw-text
+    row). ``reason`` explains the latter two — an error bucket for ``fallback``, a
+    review trigger for ``needs_review``. ``confidence`` rides on both parsed
+    outcomes and is omitted on ``fallback``, where no note was produced and
+    guessing one would be a lie.
+
+    Only ``fallback`` is a WARNING. A ``needs_review`` row LANDED — nothing broke,
+    and this trigger is expected to fire often, so crying wolf about it would
+    train the reader to ignore the level.
     """
     detail = f" reason={reason}" if reason else ""
     detail += f" confidence={confidence}" if confidence else ""
     entry: dict[str, str] = {
-        "severity": "WARNING" if outcome == "fallback" else "INFO",
+        "severity": "WARNING" if outcome == _OUTCOME_FALLBACK else "INFO",
         "message": f"gemini_parse outcome={outcome}{detail}",
         "event": "gemini_parse",
         "outcome": outcome,
@@ -226,6 +242,55 @@ def _as_status(value: Any) -> str:
         if text.lower() == allowed.lower():
             return allowed
     return "Paid"
+
+
+def has_usable_amount(amount: str) -> bool:
+    """Whether an Amount cell holds a real, actionable figure.
+
+    Blank, non-numeric ("abc", "200 CFA") and **zero** all mean "no amount". Zero
+    is included because the model does NOT reliably leave the field empty when it
+    finds nothing: a live run on the contentless text "Recu paiement" returned
+    ``amount: 0`` despite the system instruction saying never to invent one, which
+    would otherwise sail through as a confident "✅ Logged: Revenue 0". A
+    zero-value catering entry carries no financial meaning, so treating it as
+    absent costs nothing and stops a fabricated number reaching the ledger.
+    Negatives stay valid — a refund is a real figure.
+
+    Shared by ``review_reason`` and ``whatsapp.build_confirmation`` so the Sheet,
+    the reply and the logs can't disagree about whether a row is usable.
+    """
+    try:
+        return float(amount.strip()) != 0
+    except ValueError:
+        return False
+
+
+def review_reason(note: ParsedNote) -> str | None:
+    """Why a parsed row needs the owner's eye, or ``None`` if it's clean (#9).
+
+    The single source of the review decision, deliberately here rather than in
+    the Sheets adapter: ``_generate_note`` logs it, ``sheets.build_row_from_note``
+    flags on it, and one function means the telemetry and the ledger can never
+    disagree about what a row is.
+
+    Precedence is load-bearing. A row can trip both triggers — the live
+    "Recu paiement" case returned ``amount: 0`` *and* ``confidence: low`` — but a
+    log-based metric label needs a single value, so we report the more actionable
+    one. ``no_amount`` is a **fact** about the row; ``low_confidence`` is only the
+    model's **opinion** of itself, and a poorly calibrated one: a 2026-07-15 smoke
+    run scored a complete, correct row ``low`` while a sparser row scored ``high``.
+
+    That ordering is what makes the buckets worth counting: ``low_confidence``
+    means "flagged *only* because the model doubted, row otherwise fine" — i.e.
+    the candidate noise — while ``no_amount`` means the row is genuinely unusable.
+    The split between them answers whether the low-confidence trigger earns its
+    place, without having to ask the owner to notice.
+    """
+    if not has_usable_amount(note.amount):
+        return _REVIEW_NO_AMOUNT
+    if note.confidence == "low":
+        return _REVIEW_LOW_CONFIDENCE
+    return None
 
 
 def coerce_note(data: dict[str, Any], raw_text: str, today: date) -> ParsedNote:
@@ -339,7 +404,7 @@ def _generate_note(contents: Any, raw_text: str, today: date) -> ParsedNote | No
         # plus the human WARNING with exc_info — falling back is expected on
         # transient throttling (free-tier 429), so WARNING (not ERROR) keeps the
         # cause visible in Cloud Logging without alarming noise.
-        _log_parse_outcome("fallback", reason=_classify_error(exc))
+        _log_parse_outcome(_OUTCOME_FALLBACK, reason=_classify_error(exc))
         logger.warning("Gemini parse failed; falling back to raw row", exc_info=True)
         return None
     if not isinstance(data, dict):
@@ -348,7 +413,7 @@ def _generate_note(contents: Any, raw_text: str, today: date) -> ParsedNote | No
         # path's human-readable WARNING (there's no exception here) so this stays
         # diagnosable if the model starts returning non-objects; the repr is
         # truncated so a large value can't flood the logs.
-        _log_parse_outcome("fallback", reason=_REASON_BAD_JSON)
+        _log_parse_outcome(_OUTCOME_FALLBACK, reason=_REASON_BAD_JSON)
         logger.warning(
             "Gemini returned non-object JSON (type=%s, value=%s); falling back to raw row",
             type(data).__name__,
@@ -360,7 +425,14 @@ def _generate_note(contents: Any, raw_text: str, today: date) -> ParsedNote | No
     # normalises (anything but "high" is low). The telemetry and the Sheet then
     # can't disagree about how trustworthy a row is.
     note = coerce_note(data, raw_text=raw_text, today=today)
-    _log_parse_outcome("success", confidence=note.confidence)
+    # Same call sheets.build_row_from_note makes to decide the NEEDS_REVIEW flag,
+    # so a row logged needs_review is exactly a row flagged in the Sheet.
+    reason = review_reason(note)
+    _log_parse_outcome(
+        _OUTCOME_NEEDS_REVIEW if reason else _OUTCOME_SUCCESS,
+        reason=reason,
+        confidence=note.confidence,
+    )
     return note
 
 

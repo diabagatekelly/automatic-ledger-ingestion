@@ -28,7 +28,8 @@ import hmac
 from dataclasses import dataclass
 from typing import Any
 
-from src.sheets import has_usable_amount, strip_review_marker
+from src.llm import has_usable_amount
+from src.sheets import strip_review_marker
 
 
 @dataclass(frozen=True)

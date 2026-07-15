@@ -4,14 +4,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.llm import ParsedNote
+from src.llm import ParsedNote, has_usable_amount
 from src.sheets import (
     NEEDS_REVIEW,
     _mark_for_review,
     append_row,
     build_row,
     build_row_from_note,
-    has_usable_amount,
     strip_review_marker,
 )
 

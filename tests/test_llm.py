@@ -17,9 +17,26 @@ from src.llm import (
     coerce_note,
     parse_image,
     parse_note,
+    review_reason,
 )
 
 TODAY = date(2026, 7, 13)
+
+
+def _parsed(**overrides: str) -> ParsedNote:
+    """A clean, fully-populated ParsedNote; override just the field under test."""
+    base = {
+        "date": "2026-07-13",
+        "contract_name": "Diallo",
+        "event": "Diallo wedding",
+        "category": "Ingredients",
+        "type": "Expense",
+        "amount": "200",
+        "notes": "Meat for the wedding",
+        "confidence": "high",
+        "status": "Paid",
+    }
+    return ParsedNote(**{**base, **overrides})  # type: ignore[arg-type]
 
 
 class FakeResponse:
@@ -493,16 +510,41 @@ def test_parse_image_logs_outcome(
     assert _outcome_entries(capsys)[0]["outcome"] == "success"
 
 
-# --- confidence on the success path (Issue #9) ---
+# --- the three-state outcome (Issue #9) ---
 #
-# outcome="success" only means Gemini answered in usable JSON — NOT that the
-# answer was any good. A blurry receipt or a photo of a mat comes back as
-# well-formed JSON with empty fields and confidence "low", which still logs
-# success. Logging the confidence is what makes that case countable.
+# success      — a clean row, lands unflagged
+# needs_review — parsed fine, but missing info or bogus data; row lands FLAGGED
+# fallback     — the parse itself failed; raw-text row
+#
+# The review decision is computed here, upstream of the Sheet, so the telemetry
+# and the NEEDS_REVIEW flag can never disagree about what a row is. Before this,
+# a junk row and a good row both logged plain "success" and were indistinguishable.
+
+
+def test_review_reason_is_none_for_a_clean_row() -> None:
+    assert review_reason(_parsed(amount="200", confidence="high")) is None
+
+
+@pytest.mark.parametrize("amount", ["", "   ", "0", "0.0", "abc"])
+def test_review_reason_is_no_amount_when_the_figure_is_unusable(amount: str) -> None:
+    assert review_reason(_parsed(amount=amount, confidence="high")) == "no_amount"
+
+
+def test_review_reason_is_low_confidence_when_only_the_model_doubts() -> None:
+    # The wedding-cake case: a complete, correct row the model scored low. This
+    # is the bucket that answers "is the low-confidence trigger just noise?".
+    assert review_reason(_parsed(amount="200", confidence="low")) == "low_confidence"
+
+
+def test_review_reason_prefers_no_amount_when_both_triggers_fire() -> None:
+    # "Recu paiement" trips both: amount=0 AND confidence=low. Report the
+    # unambiguous, actionable one — a metric label needs a single value, and
+    # "no amount" is the fact; "low confidence" is only the model's opinion.
+    assert review_reason(_parsed(amount="0", confidence="low")) == "no_amount"
 
 
 @pytest.mark.parametrize("stated, expected", [("high", "high"), ("low", "low")])
-def test_parse_note_logs_confidence_on_success(
+def test_parse_note_logs_confidence_on_every_parsed_row(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     stated: str,
@@ -513,9 +555,63 @@ def test_parse_note_logs_confidence_on_success(
 
     assert parse_note("Cash sale, 200", TODAY) is not None
 
+    assert _outcome_entries(capsys)[0]["confidence"] == expected
+
+
+def test_parse_note_logs_success_only_for_an_unflagged_row(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    body = json.dumps({"amount": 200, "type": "Revenue", "confidence": "high"})
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text=body))
+
+    assert parse_note("Cash sale, 200", TODAY) is not None
+
     entry = _outcome_entries(capsys)[0]
     assert entry["outcome"] == "success"
-    assert entry["confidence"] == expected
+    assert "reason" not in entry  # nothing to review
+
+
+def test_parse_note_logs_needs_review_for_low_confidence(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    body = json.dumps({"amount": 200, "type": "Revenue", "confidence": "low"})
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text=body))
+
+    assert parse_note("Cash sale, 200", TODAY) is not None
+
+    entry = _outcome_entries(capsys)[0]
+    assert entry["outcome"] == "needs_review"
+    assert entry["reason"] == "low_confidence"
+    assert entry["confidence"] == "low"
+    # A flagged row still LANDED — it is not an error and must not cry wolf in
+    # the logs, especially since this trigger is expected to fire often.
+    assert entry["severity"] == "INFO"
+
+
+def test_parse_note_logs_needs_review_for_a_fabricated_zero_amount(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The live "Recu paiement" case: the model invents amount=0 rather than
+    # leaving it blank, despite the system instruction telling it not to.
+    body = json.dumps({"amount": 0, "type": "Revenue", "confidence": "low"})
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text=body))
+
+    assert parse_note("Recu paiement", TODAY) is not None
+
+    entry = _outcome_entries(capsys)[0]
+    assert entry["outcome"] == "needs_review"
+    assert entry["reason"] == "no_amount"
+
+
+def test_needs_review_is_distinguishable_from_fallback_in_the_logs(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The whole point: a junk row that PARSED is not the same event as a parse
+    # that FAILED, and the ledger cares about the difference.
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text="not json"))
+    assert parse_note("hi", TODAY) is None
+
+    assert _outcome_entries(capsys)[0]["outcome"] == "fallback"
 
 
 def test_parse_note_logs_the_coerced_confidence_not_the_raw_value(
@@ -532,23 +628,25 @@ def test_parse_note_logs_the_coerced_confidence_not_the_raw_value(
     assert _outcome_entries(capsys)[0]["confidence"] == note.confidence == "low"
 
 
-def test_junk_input_logs_success_with_low_confidence(
+def test_junk_image_logs_needs_review_not_success(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # The photo-of-a-mat case: Gemini obeys the schema and returns empty fields.
-    # This is NOT a fallback — it is the gap the confidence field exists to expose.
+    # Still NOT a fallback — the parse worked. But it must not read as a clean
+    # success either, which is exactly what it used to do.
     body = json.dumps({"amount": "", "contract_name": "", "confidence": "low"})
     monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text=body))
 
     assert parse_image(b"x", "image/png", TODAY, caption="") is not None
 
     entry = _outcome_entries(capsys)[0]
-    assert entry["outcome"] == "success"
+    assert entry["outcome"] == "needs_review"
+    assert entry["reason"] == "no_amount"
     assert entry["severity"] == "INFO"
     assert entry["confidence"] == "low"
 
 
-def test_fallback_logs_no_confidence(
+def test_fallback_logs_no_confidence_field(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # A fallback never produced a note, so there is no confidence to report —
