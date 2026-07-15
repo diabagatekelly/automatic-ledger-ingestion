@@ -11,6 +11,7 @@ from src.sheets import (
     append_row,
     build_row,
     build_row_from_note,
+    has_usable_amount,
     strip_review_marker,
 )
 
@@ -90,10 +91,44 @@ def test_build_row_from_note_flags_an_unparseable_amount(amount: str) -> None:
     assert row[6].startswith(NEEDS_REVIEW)
 
 
-@pytest.mark.parametrize("amount", ["200", "200.50", "0.01"])
+@pytest.mark.parametrize("amount", ["200", "200.50", "0.01", "-50", "-0.01"])
 def test_build_row_from_note_does_not_flag_a_real_amount(amount: str) -> None:
+    # Negatives included deliberately: a refund or a correction is a real,
+    # actionable figure. Only zero/blank/non-numeric mean "no amount".
     row = build_row_from_note(_note(amount=amount, confidence="high"))
     assert NEEDS_REVIEW not in row[6]
+
+
+# --- has_usable_amount (pure) ---
+#
+# Tested directly, not only through its callers: both build_row_from_note and
+# whatsapp.build_confirmation branch on it, so its edges are worth pinning once
+# here rather than inferring them from row assertions.
+
+
+@pytest.mark.parametrize("amount", ["200", "200.50", "0.01", "-50", " 200 "])
+def test_has_usable_amount_accepts_any_non_zero_number(amount: str) -> None:
+    assert has_usable_amount(amount) is True
+
+
+@pytest.mark.parametrize(
+    "amount",
+    [
+        "",
+        "   ",
+        "0",
+        "0.0",
+        "0.00",
+        "-0",
+        "-0.0",  # signed zero is still zero
+        "abc",
+        "N/A",
+        "-",
+        "200 CFA",  # a currency-tagged string isn't a number
+    ],
+)
+def test_has_usable_amount_rejects_zero_blank_and_non_numeric(amount: str) -> None:
+    assert has_usable_amount(amount) is False
 
 
 @pytest.mark.parametrize("notes", ["Cash sale", "", "=IMPORTXML(evil)", "NEEDS_REVIEW literal"])

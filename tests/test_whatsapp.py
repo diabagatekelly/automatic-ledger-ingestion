@@ -1,6 +1,8 @@
 import hashlib
 import hmac
 
+import pytest
+
 from src.sheets import NEEDS_REVIEW
 from src.whatsapp import (
     InboundImage,
@@ -261,6 +263,26 @@ def test_build_confirmation_asks_for_clarification_when_amount_is_zero() -> None
     assert "amount" in message.lower()
     assert "Recu paiement" in message
     assert NEEDS_REVIEW not in message
+
+
+@pytest.mark.parametrize("amount", ["abc", "N/A", "200 CFA"])
+def test_build_confirmation_asks_for_clarification_when_amount_is_unparseable(
+    amount: str,
+) -> None:
+    # coerce_note keeps a non-numeric amount verbatim. The reply must treat it the
+    # same as a missing one — "✅ Logged: Revenue abc" would be nonsense.
+    row = ["2026-07-15", "", "", "Revenue", "Revenue", amount, f"{NEEDS_REVIEW} — Recu", "Paid"]
+    message = build_confirmation(row)
+    assert "✅" not in message
+    assert "amount" in message.lower()
+
+
+def test_build_confirmation_is_normal_for_a_negative_amount() -> None:
+    # A refund is a real figure — it must not be mistaken for a missing amount.
+    row = ["2026-07-15", "", "Refund", "Expense", "Other", "-50", "Refunded deposit", "Paid"]
+    message = build_confirmation(row)
+    assert message.startswith("✅")
+    assert "-50" in message
 
 
 def test_build_confirmation_is_normal_for_low_confidence_with_an_amount() -> None:
