@@ -26,6 +26,25 @@ source of truth** shared with #33's retry decision (transient = `transient_429`/
 A `fallback` means the message still landed as a **raw-text row** (nothing is lost);
 the telemetry just tells us how often, and why, the structured parse degraded.
 
+### ⚠️ What is *not* a fallback (until #9)
+
+`outcome` measures **mechanical** failure only — Gemini erroring, refusing, or
+returning unusable bytes. It says nothing about whether the *answer was any good*.
+
+A blurry receipt, a photo of a mat, a screenshot, an off-topic text — none of these
+log a `fallback`. Gemini is asked for JSON and dutifully returns well-formed JSON
+with empty fields and `confidence: "low"`; `_generate_note` only checks
+`isinstance(data, dict)` (`src/llm.py:307`), so it logs **`outcome="success"`** and a
+junk row lands in the Sheet. The fallback rate stays clean while the ledger gets dirty.
+
+So don't try to test the telemetry by sending a bad photo — you'll get a `success`
+line. Fallbacks are **rare by design** (a real 429/503 after retries, a dead API key,
+a blocked response); normal messages log `success`. That rarity is the point — it's
+what the metric quantifies.
+
+**Issue #9** closes this: it logs `confidence` on the success path so low-confidence
+parses are countable, and flags those rows `NEEDS_REVIEW` for the owner.
+
 ## Read it in Logs Explorer
 
 All parse outcomes (last hour, newest first):
@@ -79,8 +98,29 @@ gcloud logging metrics create gemini_parse_fallbacks \
     AND jsonPayload.event="gemini_parse" AND jsonPayload.outcome="fallback"'
 ```
 
+> **⚠️ Running these on Windows.** The commands above are written for bash. In
+> PowerShell 5.1 the double quotes inside `--log-filter` get mangled on the way to
+> `gcloud.cmd` and the create can fail — this is why `gemini_parse_fallbacks` was
+> silently missing for a day after #34 shipped while `gemini_parse_total` existed.
+> Either run them in Git Bash, or sidestep the quoting with a YAML config file:
+>
+> ```powershell
+> # fallbacks-metric.yaml:  description: <text>  /  filter: |- <the filter>
+> & $gcloud logging metrics create gemini_parse_fallbacks `
+>     --project=catering-ledger --config-from-file=fallbacks-metric.yaml
+> ```
+>
+> Always verify after creating: `gcloud logging metrics describe <name> --project=catering-ledger`.
+
 Then in **Metrics Explorer** chart `logging/user/gemini_parse_fallbacks` ÷
 `logging/user/gemini_parse_total` (a ratio) for the fallback rate over any window.
+
+> **⚠️ The ratio lies before both metrics existed.** Log-based metrics **do not
+> backfill** — they only count lines written after the metric is created. The two
+> here were created ~a day apart (`total` 2026-07-14 23:26 UTC, `fallbacks`
+> 2026-07-15), so any window reaching back before **2026-07-15** has a structurally
+> zero numerator over a real denominator and charts a **falsely perfect 0% fallback
+> rate**. Only trust the ratio from 2026-07-15 forward.
 
 ### Optional: a single reason-labelled metric
 
