@@ -126,127 +126,107 @@ gcloud logging read \
   --format='table(timestamp, jsonPayload.reason)'
 ```
 
-## Log-based metrics
+## The log-based metric — `gemini_parse_counter`
 
-Counter metrics, each giving a rate over `gemini_parse_total`:
+**There is exactly one, and it answers everything.** One counter over
+`jsonPayload.event="gemini_parse"`, sliced by three label extractors:
 
-| rate | numerator | what it tells you |
-|------|-----------|-------------------|
-| **fallback rate** | `gemini_parse_fallbacks` | how often the parse *failed* → drives #33's durable-queue go/no-go |
-| **needs-review rate** | `gemini_needs_review` | how often a row lands **flagged** — the owner's manual-fix burden |
-| **low-confidence rate** | `gemini_low_confidence` | how often the model doubts itself, regardless of whether the row is usable |
+| label | field | values |
+|-------|-------|--------|
+| `outcome` | `EXTRACT(jsonPayload.outcome)` | `success` · `needs_review` · `fallback` |
+| `reason` | `EXTRACT(jsonPayload.reason)` | the review trigger or the error bucket |
+| `confidence` | `EXTRACT(jsonPayload.confidence)` | `high` · `low` |
 
-`gemini_needs_review` is the one to watch, **split by `reason`** — `no_amount` is real
-junk, `low_confidence` is candidate noise. `gemini_low_confidence` predates the
-three-state outcome and largely overlaps it; it's kept because it's already collecting
-and measures a subtly different thing (self-doubt, not usability).
+Every question is a slice of it — no second metric, no ratio between two counters that
+have to be kept in sync:
 
-They're plain, verified `gcloud` counters (no label-extractor gymnastics); the
-per-`reason` split is read from `jsonPayload.reason` in Logs Explorer (above) or by
-adding a label in the metric's console UI.
+| question | slice |
+|----------|-------|
+| total parses | sum across labels |
+| **fallback rate** — drives #33's durable-queue go/no-go | `{outcome="fallback"}` ÷ total, split by `reason` |
+| **needs-review rate** — the owner's manual-fix burden | `{outcome="needs_review"}` ÷ total |
+| **real junk** | `{reason="no_amount"}` |
+| **candidate noise** — flagged *only* on model self-doubt | `{reason="low_confidence"}` |
+| model self-doubt overall | `{confidence="low"}` |
 
-```bash
-# Total parses
-gcloud logging metrics create gemini_parse_total \
-  --project=catering-ledger \
-  --description="Gemini parse attempts (success + fallback)" \
-  --log-filter='resource.type="cloud_run_revision"
-    AND resource.labels.service_name="catering-ledger-webhook"
-    AND jsonPayload.event="gemini_parse"'
+Labels also mean the metric absorbs schema growth: it picked up the third `outcome`
+value (`needs_review`) the moment #9 shipped, without being touched.
 
-# Fallbacks only
-gcloud logging metrics create gemini_parse_fallbacks \
-  --project=catering-ledger \
-  --description="Gemini parses that fell back to a raw-text row" \
-  --log-filter='resource.type="cloud_run_revision"
-    AND resource.labels.service_name="catering-ledger-webhook"
-    AND jsonPayload.event="gemini_parse" AND jsonPayload.outcome="fallback"'
+### Recreating it
 
-# Low-confidence successes — screening signal for junk rows (#9)
-gcloud logging metrics create gemini_low_confidence \
-  --project=catering-ledger \
-  --description="Parses where Gemini reported low confidence (screening signal, not a junk count)" \
-  --log-filter='resource.type="cloud_run_revision"
-    AND resource.labels.service_name="catering-ledger-webhook"
-    AND jsonPayload.event="gemini_parse" AND jsonPayload.confidence="low"'
+Built in the Console (**Logging → Log-based Metrics → Create metric → Counter**), which
+handles label descriptors that the `gcloud` flags make fiddly. To do it from the CLI,
+use a YAML config — `--log-filter` on the command line is a quoting trap (below):
 
-# Rows that landed FLAGGED — split by reason to separate junk from noise (#9)
-gcloud logging metrics create gemini_needs_review \
-  --project=catering-ledger \
-  --description="Rows that landed flagged NEEDS_REVIEW (see reason: no_amount vs low_confidence)" \
-  --log-filter='resource.type="cloud_run_revision"
-    AND resource.labels.service_name="catering-ledger-webhook"
-    AND jsonPayload.event="gemini_parse" AND jsonPayload.outcome="needs_review"'
+```yaml
+# counter-metric.yaml
+description: Gemini parse outcomes, labelled by outcome / reason / confidence
+filter: |-
+  resource.type="cloud_run_revision"
+      AND resource.labels.service_name="catering-ledger-webhook"
+      AND jsonPayload.event="gemini_parse"
+labelExtractors:
+  outcome: EXTRACT(jsonPayload.outcome)
+  reason: EXTRACT(jsonPayload.reason)
+  confidence: EXTRACT(jsonPayload.confidence)
+metricDescriptor:
+  metricKind: DELTA
+  valueType: INT64
+  unit: '1'
+  labels:
+  - key: outcome
+  - key: reason
+  - key: confidence
 ```
 
-> **⚠️ Running these on Windows.** The commands above are written for bash. In
-> PowerShell 5.1 the double quotes inside `--log-filter` get mangled on the way to
-> `gcloud.cmd` and the create can fail — this is why `gemini_parse_fallbacks` was
-> silently missing for a day after #34 shipped while `gemini_parse_total` existed.
-> Either run them in Git Bash, or sidestep the quoting with a YAML config file:
+```bash
+gcloud logging metrics create gemini_parse_counter \
+  --project=catering-ledger --config-from-file=counter-metric.yaml
+# ...or `update` to change an existing one (adding a label is additive; createTime and
+# existing history survive).
+gcloud logging metrics describe gemini_parse_counter --project=catering-ledger
+```
+
+Then chart it in **Metrics Explorer** as `logging/user/gemini_parse_counter`, grouped by
+whichever label the question needs.
+
+> **⚠️ Two `gcloud` traps, both learned the hard way.**
 >
-> ```powershell
-> # fallbacks-metric.yaml:  description: <text>  /  filter: |- <the filter>
-> & $gcloud logging metrics create gemini_parse_fallbacks `
->     --project=catering-ledger --config-from-file=fallbacks-metric.yaml
-> ```
+> **PowerShell 5.1 mangles the double quotes inside `--log-filter`** on the way to
+> `gcloud.cmd`, and a failed create is *quiet*. That's why `gemini_parse_fallbacks` sat
+> silently uncreated for a day after #34 shipped while its sibling existed, and every
+> chart read a reassuring 0%. Use Git Bash, or the YAML config above.
 >
-> Always verify after creating: `gcloud logging metrics describe <name> --project=catering-ledger`.
+> **Always `describe` after create/update.** A metric that doesn't exist and a metric
+> counting zero look identical on a chart.
 
-Then in **Metrics Explorer** chart either numerator ÷ `logging/user/gemini_parse_total`
-(a ratio) for that rate over any window. **Chart both** — they fail in opposite
-directions, and the low-confidence rate is the one that catches a quietly-degrading
-ledger while the fallback rate sits at a reassuring zero.
-
-> **⚠️ A ratio lies for any window before BOTH its metrics existed.** Log-based
-> metrics **do not backfill** — they only count lines written after the metric is
-> created. A window where the numerator metric didn't yet exist charts a
-> **falsely perfect 0%** over a real denominator: not "healthy", just "not counting".
+> **⚠️ Metrics and labels do NOT backfill.** Both only apply to log lines written after
+> they exist. A metric created *after* the revision that emits its field silently loses
+> the window in between; a metric created *before* just counts zero, which is harmless.
+> **So always create the metric first, then deploy the code that emits the field.**
 >
-> | metric | counting since |
-> |--------|----------------|
-> | `gemini_parse_total` | 2026-07-14 23:26 UTC |
-> | `gemini_parse_fallbacks` | 2026-07-15 12:50 UTC |
-> | `gemini_low_confidence` | 2026-07-15 13:13 UTC |
-> | `gemini_parse_counter` (labelled) | 2026-07-15 13:55 UTC |
-> | `gemini_needs_review` | 2026-07-15 16:28 UTC — **before** the #9 deploy, deliberately |
->
-> So: trust the **fallback rate** from 2026-07-15 forward only.
->
-> **Always create the metric before the revision that emits its field.** A metric that
-> predates its field counts zero — harmless — whereas one created afterwards silently
-> loses the window in between. That's what left `gemini_parse_fallbacks` blind for a
-> day. Creating early costs nothing.
+> `gemini_parse_counter` counts from **2026-07-15 13:55 UTC**; the `reason` label was
+> added **16:37 UTC**, before #9's outcome/reason values ever reached prod — so no
+> window is missing for them. Trust it from 2026-07-15 forward.
 
-### `gemini_parse_counter` — the labelled metric (exists; prefer it for dashboards)
+### Why only one metric
 
-Created in the Console 2026-07-15, this is **one** metric over
-`jsonPayload.event="gemini_parse"` with label extractors:
-
-| label | field |
-|-------|-------|
-| `outcome` | `EXTRACT(jsonPayload.outcome)` |
-| `confidence` | `EXTRACT(jsonPayload.confidence)` |
-
-It subsumes most of the separate counters above — slice by `outcome` for the fallback
-and needs-review rates, by `confidence` for self-doubt, and sum across labels for the
-total. It also picked up the third `outcome` value (`needs_review`) for free when #9
-landed, without touching the metric.
-
-**⚠️ It does not yet label `reason`** — which is now the field that matters, since it
-separates real junk (`no_amount`) from candidate noise (`low_confidence`), and the
-error buckets on `fallback`. Add a third label `reason` → `EXTRACT(jsonPayload.reason)`
-in the Console (**Logging → Log-based Metrics →** edit → **Add label**); the Console
-handles the label descriptor that the `gcloud` flags make fiddly. Note a label added
-now only applies to logs written from that point on — same no-backfill rule as the
-metrics themselves.
-
-The standalone counters are kept because they're already collecting and cost nothing,
-but for a dashboard, prefer this one.
+There were briefly five: `gemini_parse_total`, `gemini_parse_fallbacks`,
+`gemini_low_confidence`, `gemini_needs_review` and this one. Every one of the first four
+turned out to be a slice of this metric's labels, so they were deleted on 2026-07-15.
+**Reach for a label before a new metric** — a single-purpose counter answers one
+question forever, while a label answers questions you haven't thought of yet (`reason`
+is the proof: it only became the interesting field *after* the metrics were built).
 
 ## Why this decides the durable-retry-queue go/no-go (#33 follow-up)
 
-`gemini_parse_fallbacks` split by `reason` is the data the queue decision needs:
-a high `transient_429`/`transient_503` share *after* #33's in-request retry means a
-durable queue would pay off; a low one means it wouldn't. This slice produces the
-numbers so that call is data-driven, not a guess.
+`gemini_parse_counter{outcome="fallback"}` grouped by `reason` is the data the queue
+decision needs: a high `transient_429`/`transient_503` share *after* #33's in-request
+retry means a durable queue would pay off; a low one means it wouldn't. This slice
+produces the numbers so that call is data-driven, not a guess.
+
+The same metric answers #9's open question from the other direction:
+`{reason="low_confidence"}` versus `{reason="no_amount"}` says how much of the owner's
+`NEEDS_REVIEW` burden is real junk and how much is the model second-guessing itself on
+rows that were fine. If it's mostly the latter and she says the flag isn't earning its
+keep, drop that trigger — one line in `llm.review_reason`.
