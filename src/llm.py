@@ -97,6 +97,8 @@ _REASON_TRANSIENT_429 = "transient_429"
 _REASON_TRANSIENT_503 = "transient_503"
 _REASON_NO_API_KEY = "no_api_key"
 _REASON_BAD_JSON = "bad_json"
+_REASON_EMPTY_RESPONSE = "empty_response"
+_REASON_BAD_REQUEST_400 = "bad_request_400"
 _REASON_OTHER = "other"
 _TRANSIENT_REASONS = (_REASON_TRANSIENT_429, _REASON_TRANSIENT_503)
 
@@ -105,6 +107,15 @@ class MissingAPIKeyError(RuntimeError):
     """Raised when ``GEMINI_API_KEY`` is unset — a config error, typed so the
     telemetry classifier can bucket it distinctly (``no_api_key``) rather than
     string-matching a generic ``RuntimeError``."""
+
+
+class EmptyResponseError(RuntimeError):
+    """Raised when Gemini returns no text at all (``response.text`` is None or
+    blank) — a safety block or a no-candidates response.
+
+    Typed so the classifier can bucket it as ``empty_response``: it used to reach
+    ``raw_decode("")`` and surface as ``bad_json``, which reads as "the model sent
+    garbage" when in fact the model sent nothing. Different cause, different fix."""
 
 
 def _classify_error(exc: BaseException) -> str:
@@ -118,30 +129,51 @@ def _classify_error(exc: BaseException) -> str:
             return _REASON_TRANSIENT_429
         if exc.code == 503:
             return _REASON_TRANSIENT_503
+        # How the API rejects unusable input — corrupt image bytes, an
+        # unsupported mime type, an oversized payload. Split out because that is
+        # an actionable "the thing we sent was wrong", unlike a generic failure.
+        if exc.code == 400:
+            return _REASON_BAD_REQUEST_400
         return _REASON_OTHER
     if isinstance(exc, MissingAPIKeyError):
         return _REASON_NO_API_KEY
+    if isinstance(exc, EmptyResponseError):
+        return _REASON_EMPTY_RESPONSE
     if isinstance(exc, json.JSONDecodeError):
         return _REASON_BAD_JSON
     return _REASON_OTHER
 
 
-def _log_parse_outcome(outcome: str, *, reason: str | None = None) -> None:
+def _log_parse_outcome(
+    outcome: str, *, reason: str | None = None, confidence: str | None = None
+) -> None:
     """Emit one structured JSON log line per parse outcome for #34 telemetry.
 
     Printed as a single-line JSON object to stdout so Cloud Run's logging agent
     parses it into ``jsonPayload`` with queryable fields (``event``/``outcome``/
-    ``reason``) — no logging library or external service needed. A Cloud
-    Monitoring log-based metric counts these; see docs/OBSERVABILITY.md.
+    ``reason``/``confidence``) — no logging library or external service needed. A
+    Cloud Monitoring log-based metric counts these; see docs/OBSERVABILITY.md.
+
+    ``confidence`` is set on ``success`` only, and is the reason a ``success``
+    line is worth reading (#9): ``outcome`` reports whether Gemini *answered*,
+    not whether the answer was usable. A blurry receipt or a non-receipt photo
+    returns schema-valid JSON with empty fields and ``confidence="low"`` — a
+    success by this metric, a junk row in the Sheet. Counting low-confidence
+    successes is what makes that visible. Omitted on ``fallback``: no note was
+    produced, so there is no confidence to report and guessing one would be a lie.
     """
+    detail = f" reason={reason}" if reason else ""
+    detail += f" confidence={confidence}" if confidence else ""
     entry: dict[str, str] = {
         "severity": "WARNING" if outcome == "fallback" else "INFO",
-        "message": f"gemini_parse outcome={outcome}" + (f" reason={reason}" if reason else ""),
+        "message": f"gemini_parse outcome={outcome}{detail}",
         "event": "gemini_parse",
         "outcome": outcome,
     }
     if reason is not None:
         entry["reason"] = reason
+    if confidence is not None:
+        entry["confidence"] = confidence
     print(json.dumps(entry), flush=True)
 
 
@@ -291,10 +323,16 @@ def _generate_note(contents: Any, raw_text: str, today: date) -> ParsedNote | No
                 temperature=0.0,
             ),
         )
+        text = (response.text or "").lstrip()
+        if not text:
+            # Nothing came back — a safety block or a no-candidates response.
+            # Guarded explicitly because raw_decode("") raises JSONDecodeError,
+            # which would bucket a silent refusal as bad_json (#9).
+            raise EmptyResponseError("Gemini returned an empty response body")
         # raw_decode parses the FIRST JSON value and ignores anything after it:
         # Gemini occasionally appends a stray "}" or trailing text even in JSON
         # mode, which json.loads would reject as "Extra data".
-        data, _ = json.JSONDecoder().raw_decode((response.text or "").lstrip())
+        data, _ = json.JSONDecoder().raw_decode(text)
     except Exception as exc:
         # Deliberately broad: never let a parse hiccup drop the owner's message.
         # One structured outcome line (queryable, drives the log-based metric #34)
@@ -317,8 +355,13 @@ def _generate_note(contents: Any, raw_text: str, today: date) -> ParsedNote | No
             repr(data)[:200],
         )
         return None
-    _log_parse_outcome("success")
-    return coerce_note(data, raw_text=raw_text, today=today)
+    # Coerce BEFORE logging so the reported confidence is the coerced value that
+    # actually lands in the row — not the model's raw claim, which coerce_note
+    # normalises (anything but "high" is low). The telemetry and the Sheet then
+    # can't disagree about how trustworthy a row is.
+    note = coerce_note(data, raw_text=raw_text, today=today)
+    _log_parse_outcome("success", confidence=note.confidence)
+    return note
 
 
 def parse_note(text: str, today: date) -> ParsedNote | None:

@@ -8,6 +8,7 @@ from google.genai import errors, types
 from src.llm import (
     _RETRY_INITIAL_DELAY,
     _RETRY_MAX_ATTEMPTS,
+    EmptyResponseError,
     MissingAPIKeyError,
     ParsedNote,
     _build_client,
@@ -22,7 +23,7 @@ TODAY = date(2026, 7, 13)
 
 
 class FakeResponse:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str | None) -> None:
         self.text = text
 
 
@@ -41,6 +42,20 @@ class FakeClient:
             raise self._raises
         assert self._text is not None
         return FakeResponse(self._text)
+
+
+class NoTextClient:
+    """generate_content returns a response whose .text is None.
+
+    What the SDK gives back when a response carries no candidates at all — e.g.
+    a safety block. Distinct from a malformed body: nothing was returned to parse.
+    """
+
+    def __init__(self) -> None:
+        self.models = self
+
+    def generate_content(self, **kwargs: object) -> FakeResponse:
+        return FakeResponse(None)
 
 
 class FlakyClient:
@@ -379,8 +394,10 @@ def _outcome_entries(capsys: pytest.CaptureFixture[str]) -> list[dict[str, str]]
 def test_classify_error_buckets_every_failure_mode() -> None:
     assert _classify_error(_api_error(429)) == "transient_429"
     assert _classify_error(_api_error(503)) == "transient_503"
-    assert _classify_error(_api_error(400)) == "other"
+    assert _classify_error(_api_error(400)) == "bad_request_400"
+    assert _classify_error(_api_error(418)) == "other"
     assert _classify_error(MissingAPIKeyError("no key")) == "no_api_key"
+    assert _classify_error(EmptyResponseError("empty")) == "empty_response"
     assert _classify_error(json.JSONDecodeError("bad", "doc", 0)) == "bad_json"
     assert _classify_error(ValueError("boom")) == "other"
 
@@ -474,6 +491,113 @@ def test_parse_image_logs_outcome(
     assert parse_image(b"x", "image/png", TODAY, caption="") is not None
 
     assert _outcome_entries(capsys)[0]["outcome"] == "success"
+
+
+# --- confidence on the success path (Issue #9) ---
+#
+# outcome="success" only means Gemini answered in usable JSON — NOT that the
+# answer was any good. A blurry receipt or a photo of a mat comes back as
+# well-formed JSON with empty fields and confidence "low", which still logs
+# success. Logging the confidence is what makes that case countable.
+
+
+@pytest.mark.parametrize("stated, expected", [("high", "high"), ("low", "low")])
+def test_parse_note_logs_confidence_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stated: str,
+    expected: str,
+) -> None:
+    body = json.dumps({"amount": 200, "type": "Revenue", "confidence": stated})
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text=body))
+
+    assert parse_note("Cash sale, 200", TODAY) is not None
+
+    entry = _outcome_entries(capsys)[0]
+    assert entry["outcome"] == "success"
+    assert entry["confidence"] == expected
+
+
+def test_parse_note_logs_the_coerced_confidence_not_the_raw_value(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # coerce_note treats anything that isn't "high" as low; the telemetry must
+    # report what actually landed in the row, not what the model claimed.
+    body = json.dumps({"amount": 200, "confidence": "medium"})
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text=body))
+
+    note = parse_note("hi", TODAY)
+
+    assert note is not None
+    assert _outcome_entries(capsys)[0]["confidence"] == note.confidence == "low"
+
+
+def test_junk_input_logs_success_with_low_confidence(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The photo-of-a-mat case: Gemini obeys the schema and returns empty fields.
+    # This is NOT a fallback — it is the gap the confidence field exists to expose.
+    body = json.dumps({"amount": "", "contract_name": "", "confidence": "low"})
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text=body))
+
+    assert parse_image(b"x", "image/png", TODAY, caption="") is not None
+
+    entry = _outcome_entries(capsys)[0]
+    assert entry["outcome"] == "success"
+    assert entry["severity"] == "INFO"
+    assert entry["confidence"] == "low"
+
+
+def test_fallback_logs_no_confidence(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A fallback never produced a note, so there is no confidence to report —
+    # the field must be absent rather than guessed at.
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text="not json"))
+
+    assert parse_note("hi", TODAY) is None
+
+    entry = _outcome_entries(capsys)[0]
+    assert entry["outcome"] == "fallback"
+    assert "confidence" not in entry
+
+
+# --- reason buckets that used to be mislabelled (Issue #9) ---
+
+
+def test_parse_note_logs_empty_response_not_bad_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A safety-blocked / no-candidates response is empty, not malformed. It used
+    # to reach raw_decode("") and surface as bad_json, hiding a distinct failure.
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(text="   "))
+
+    assert parse_note("hi", TODAY) is None
+
+    assert _outcome_entries(capsys)[0]["reason"] == "empty_response"
+
+
+def test_parse_note_logs_empty_response_when_text_is_none(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # response.text is None when the SDK returns no candidates at all.
+    monkeypatch.setattr("src.llm._build_client", NoTextClient)
+
+    assert parse_note("hi", TODAY) is None
+
+    assert _outcome_entries(capsys)[0]["reason"] == "empty_response"
+
+
+def test_parse_note_logs_bad_request_400_separately_from_other(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A 400 is how the API rejects unusable image bytes (corrupt, bad mime,
+    # oversized) — worth telling apart from a generic failure.
+    monkeypatch.setattr("src.llm._build_client", lambda: FakeClient(raises=_api_error(400)))
+
+    assert parse_image(b"x", "image/png", TODAY, caption="") is None
+
+    assert _outcome_entries(capsys)[0]["reason"] == "bad_request_400"
 
 
 # --- parse_image (multimodal Gemini adapter, mocked client) ---
