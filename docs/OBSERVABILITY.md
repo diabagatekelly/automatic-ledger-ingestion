@@ -9,15 +9,17 @@ free-tier only.**
 ## The log schema
 
 ```json
-{"severity":"INFO",   "event":"gemini_parse","outcome":"success"}
+{"severity":"INFO",   "event":"gemini_parse","outcome":"success","confidence":"high"}
+{"severity":"INFO",   "event":"gemini_parse","outcome":"success","confidence":"low"}
 {"severity":"WARNING","event":"gemini_parse","outcome":"fallback","reason":"transient_503"}
 ```
 
-| field     | values |
-|-----------|--------|
-| `event`   | always `gemini_parse` (the stable filter key) |
-| `outcome` | `success` \| `fallback` |
-| `reason`  | present only on `fallback`: `transient_429` · `transient_503` · `no_api_key` · `bad_json` · `other` |
+| field        | values |
+|--------------|--------|
+| `event`      | always `gemini_parse` (the stable filter key) |
+| `outcome`    | `success` \| `fallback` |
+| `confidence` | present only on `success`: `high` \| `low` |
+| `reason`     | present only on `fallback`: `transient_429` · `transient_503` · `bad_request_400` · `no_api_key` · `empty_response` · `bad_json` · `other` |
 
 The `reason` buckets come from `src/llm._classify_error`, which is the **single
 source of truth** shared with #33's retry decision (transient = `transient_429`/
@@ -26,24 +28,43 @@ source of truth** shared with #33's retry decision (transient = `transient_429`/
 A `fallback` means the message still landed as a **raw-text row** (nothing is lost);
 the telemetry just tells us how often, and why, the structured parse degraded.
 
-### ⚠️ What is *not* a fallback (until #9)
+### ⚠️ `outcome` alone does not mean the answer was good — read `confidence` too
 
-`outcome` measures **mechanical** failure only — Gemini erroring, refusing, or
-returning unusable bytes. It says nothing about whether the *answer was any good*.
+`outcome` measures **mechanical** failure only: whether Gemini *answered*, not
+whether the answer was usable.
 
 A blurry receipt, a photo of a mat, a screenshot, an off-topic text — none of these
 log a `fallback`. Gemini is asked for JSON and dutifully returns well-formed JSON
-with empty fields and `confidence: "low"`; `_generate_note` only checks
-`isinstance(data, dict)` (`src/llm.py:307`), so it logs **`outcome="success"`** and a
-junk row lands in the Sheet. The fallback rate stays clean while the ledger gets dirty.
+with empty fields and `confidence: "low"`, which is a **`success`** by this metric
+and a junk row in the Sheet.
 
-So don't try to test the telemetry by sending a bad photo — you'll get a `success`
-line. Fallbacks are **rare by design** (a real 429/503 after retries, a dead API key,
-a blocked response); normal messages log `success`. That rarity is the point — it's
-what the metric quantifies.
+**`confidence` is the field that exposes that** (#9) — but read it for what it
+actually is. It is the *model's own* judgement that it had to guess at something, and
+it is **noisier than it looks**:
 
-**Issue #9** closes this: it logs `confidence` on the success path so low-confidence
-parses are countable, and flags those rows `NEEDS_REVIEW` for the owner.
+> Live smoke run, 2026-07-15 (n=3, real Gemini): `"Cash sale, $200, Wedding Cake"` →
+> a complete, correct row (Amount 200, Type Revenue, Event "Wedding Cake", Paid) that
+> scored **`low`**. `"Paid Amina 150 for kitchen help today"` → a row with *both*
+> Contract and Event empty scored **`high`**. The better row scored worse.
+
+So `confidence="low"` means **"the model thinks it guessed"**, *not* "this row is
+junk". Every junk row should be low-confidence, but **not every low-confidence row is
+junk** — the implication runs one way only. Treat `gemini_low_confidence` as a
+*screening* signal whose rate is expected to be non-trivial even on a healthy ledger,
+and establish a baseline before reading anything into it. The stronger junk signal is a
+**blank `amount`**: a row with no number in it is unusable no matter what the model
+claims about its own confidence.
+
+`confidence` is the *coerced* value (the one that lands in the row), so the logs and
+the Sheet can't disagree.
+
+So don't test the telemetry by sending a bad photo — you'll get a `success` line, just
+a low-confidence one. Fallbacks are **rare by design** (a real 429/503 after retries,
+a dead API key, a blocked response); normal messages log `success`. That rarity is the
+point — it's what the metric quantifies.
+
+Still open in #9: flagging those rows `NEEDS_REVIEW` for the owner. The telemetry half
+only makes the problem *countable*.
 
 ## Read it in Logs Explorer
 
@@ -62,7 +83,15 @@ group by `jsonPayload.reason` (the "Analyze" / field breakdown panel), or:
 jsonPayload.event="gemini_parse" AND jsonPayload.outcome="fallback"
 ```
 
-`gcloud` equivalent:
+**Low-confidence successes** — parses where the model thinks it guessed. A screening
+signal for junk rows, not a junk-row count (see the caveat above; some are perfectly
+good rows):
+
+```
+jsonPayload.event="gemini_parse" AND jsonPayload.confidence="low"
+```
+
+`gcloud` equivalent (swap the last clause for `confidence="low"` to chase junk rows):
 
 ```bash
 gcloud logging read \
@@ -73,12 +102,18 @@ gcloud logging read \
   --format='table(timestamp, jsonPayload.reason)'
 ```
 
-## Log-based metrics (fallback rate over time)
+## Log-based metrics
 
-Two counter metrics give the **fallback rate** = `fallbacks / total`. Both are
-plain, verified `gcloud` counters (no label-extractor gymnastics); the per-`reason`
-split is read from `jsonPayload.reason` in Logs Explorer (above) or by adding a
-label in the metric's console UI.
+Three counter metrics, giving two independent rates over `gemini_parse_total`:
+
+| rate | numerator | what it tells you |
+|------|-----------|-------------------|
+| **fallback rate** | `gemini_parse_fallbacks` | how often Gemini *failed* → drives #33's durable-queue go/no-go |
+| **low-confidence rate** | `gemini_low_confidence` | how often Gemini *thinks it guessed* → screening signal for #9's `NEEDS_REVIEW` work; expect a non-trivial baseline, see the caveat above |
+
+They're plain, verified `gcloud` counters (no label-extractor gymnastics); the
+per-`reason` split is read from `jsonPayload.reason` in Logs Explorer (above) or by
+adding a label in the metric's console UI.
 
 ```bash
 # Total parses
@@ -96,6 +131,14 @@ gcloud logging metrics create gemini_parse_fallbacks \
   --log-filter='resource.type="cloud_run_revision"
     AND resource.labels.service_name="catering-ledger-webhook"
     AND jsonPayload.event="gemini_parse" AND jsonPayload.outcome="fallback"'
+
+# Low-confidence successes — screening signal for junk rows (#9)
+gcloud logging metrics create gemini_low_confidence \
+  --project=catering-ledger \
+  --description="Parses where Gemini reported low confidence (screening signal, not a junk count)" \
+  --log-filter='resource.type="cloud_run_revision"
+    AND resource.labels.service_name="catering-ledger-webhook"
+    AND jsonPayload.event="gemini_parse" AND jsonPayload.confidence="low"'
 ```
 
 > **⚠️ Running these on Windows.** The commands above are written for bash. In
@@ -112,15 +155,28 @@ gcloud logging metrics create gemini_parse_fallbacks \
 >
 > Always verify after creating: `gcloud logging metrics describe <name> --project=catering-ledger`.
 
-Then in **Metrics Explorer** chart `logging/user/gemini_parse_fallbacks` ÷
-`logging/user/gemini_parse_total` (a ratio) for the fallback rate over any window.
+Then in **Metrics Explorer** chart either numerator ÷ `logging/user/gemini_parse_total`
+(a ratio) for that rate over any window. **Chart both** — they fail in opposite
+directions, and the low-confidence rate is the one that catches a quietly-degrading
+ledger while the fallback rate sits at a reassuring zero.
 
-> **⚠️ The ratio lies before both metrics existed.** Log-based metrics **do not
-> backfill** — they only count lines written after the metric is created. The two
-> here were created ~a day apart (`total` 2026-07-14 23:26 UTC, `fallbacks`
-> 2026-07-15), so any window reaching back before **2026-07-15** has a structurally
-> zero numerator over a real denominator and charts a **falsely perfect 0% fallback
-> rate**. Only trust the ratio from 2026-07-15 forward.
+> **⚠️ A ratio lies for any window before BOTH its metrics existed.** Log-based
+> metrics **do not backfill** — they only count lines written after the metric is
+> created. A window where the numerator metric didn't yet exist charts a
+> **falsely perfect 0%** over a real denominator: not "healthy", just "not counting".
+>
+> | metric | counting since |
+> |--------|----------------|
+> | `gemini_parse_total` | 2026-07-14 23:26 UTC |
+> | `gemini_parse_fallbacks` | 2026-07-15 12:50 UTC |
+> | `gemini_low_confidence` | create it **before** the #9 deploy — see below |
+>
+> So: trust the **fallback rate** from 2026-07-15 forward only.
+>
+> **Create `gemini_low_confidence` before the revision that emits `confidence` goes
+> live.** A metric that predates its field simply counts zero — harmless — whereas a
+> metric created afterwards silently loses the window in between. Create early; it
+> costs nothing and closes the gap that bit `gemini_parse_fallbacks`.
 
 ### Optional: a single reason-labelled metric
 
