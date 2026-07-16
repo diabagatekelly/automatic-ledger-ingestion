@@ -1,10 +1,21 @@
-# Observability — Gemini parse-outcome telemetry (Issue #34)
+# Observability — structured webhook telemetry (Issues #34, #44)
 
-Every Gemini parse (text **and** image, via the shared `src/llm._generate_note`)
-emits **one structured JSON log line** to stdout. Cloud Run's logging agent parses
-that line into `jsonPayload`, so the fields are directly queryable in Logs Explorer
-and countable by a Cloud Monitoring log-based metric — **no external service, no DB,
+Every observable event emits **one structured JSON log line** to stdout via the
+shared emitter in `src/telemetry.py`. Cloud Run's logging agent parses that line
+into `jsonPayload`, so the fields are directly queryable in Logs Explorer and
+countable by a Cloud Monitoring log-based metric — **no external service, no DB,
 free-tier only.**
+
+Two event families, one per failure domain:
+
+| `event` | emitted by | counted by |
+|---------|-----------|------------|
+| `gemini_parse` | `src/llm._generate_note` (text **and** image) | `gemini_parse_counter` |
+| `media_download` | `src/main._row_for_image` via `src/media.log_download_failure` | `media_download_counter` |
+
+They are deliberately **separate events**: a failed download never reaches Gemini,
+so folding it into `gemini_parse` would pollute those buckets — and keeping it out
+without its own event is exactly how a media outage stayed invisible (see below).
 
 ## The log schema
 
@@ -19,8 +30,13 @@ free-tier only.**
 |--------------|--------|
 | `event`      | always `gemini_parse` (the stable filter key) |
 | `outcome`    | `success` · `needs_review` · `fallback` |
-| `reason`     | on `needs_review`: `no_amount` · `low_confidence` — on `fallback`: `transient_429` · `transient_503` · `bad_request_400` · `no_api_key` · `empty_response` · `bad_json` · `other` |
+| `reason`     | on `needs_review`: `no_amount` · `low_confidence` — on `fallback`: `transient_429` · `transient_503` · `bad_request_400` · `no_api_key` · `invalid_api_key` · `empty_response` · `bad_json` · `other` |
 | `confidence` | on `success` and `needs_review`: `high` \| `low` — absent on `fallback` |
+
+`no_api_key` vs `invalid_api_key` (#44): the first means the key isn't **mounted**
+(fix the secret/deploy); the second means it's mounted but **rejected** — 401/403:
+revoked, mistyped, wrong project (fix the key). Same blind-spot family, different
+runbooks, and `other` used to hide the latter.
 
 ### The three outcomes
 
@@ -217,6 +233,101 @@ turned out to be a slice of this metric's labels, so they were deleted on 2026-0
 **Reach for a label before a new metric** — a single-purpose counter answers one
 question forever, while a label answers questions you haven't thought of yet (`reason`
 is the proof: it only became the interesting field *after* the metrics were built).
+
+## The `media_download` event — why a second family exists (Issue #44)
+
+If `download_media` fails, `_row_for_image` falls back to an unreadable-image
+marker row **without ever reaching Gemini** — so no `gemini_parse` line fires and
+`gemini_parse_counter` doesn't move. Before #44 that made a WhatsApp media / token
+outage **invisible to every dashboard**: the #5 expired-token incident (2026-07-13)
+filled the Sheet with `[unreadable image]` rows while every chart stayed green, and
+it was caught by the owner noticing bad rows, not by us.
+
+### The log schema
+
+```json
+{"severity":"WARNING","event":"media_download","outcome":"failure","reason":"auth_401"}
+```
+
+| field | values |
+|-------|--------|
+| `event` | always `media_download` |
+| `outcome` | `failure` (successful downloads are not logged — the parse line that follows implies them) |
+| `reason` | `auth_401` · `not_found` · `timeout` · `other` |
+
+Always `WARNING`: unlike a `needs_review` row, a failed download means the
+receipt's content is genuinely lost to the ledger.
+
+- **`auth_401`** — the Graph API rejected the access token. **This is the
+  token-expiry signature** (the #5 incident), split out deliberately so it's
+  distinguishable from a transient network failure without reading tracebacks.
+  A sustained run of `auth_401` = re-provision the token, then **redeploy**
+  (`:latest` resolves at deploy time).
+- **`not_found`** — the media id didn't resolve. Graph reports an unknown or
+  malformed id as a **400** GraphMethodException (verified live, 2026-07-16),
+  so 400 and 404 both land here; 404 covers the short-lived download URL going
+  stale between the two hops.
+- **`timeout`** — either hop exceeded the request timeout.
+- **`other`** — everything else (5xx, metadata missing its download URL).
+
+Classification lives in `src/media.classify_download_error`; the smoke script
+`scripts/smoke-media.py` proves the two live-triggerable buckets (`auth_401`,
+`not_found`) against the **real** media endpoint — unlike
+`scripts/smoke-gemini-image.py`, which reads bytes from disk and can't see a
+dead token.
+
+### Read it in Logs Explorer
+
+```
+resource.type="cloud_run_revision"
+resource.labels.service_name="catering-ledger-webhook"
+jsonPayload.event="media_download"
+```
+
+Token-expiry watch — the #5 signature specifically:
+
+```
+jsonPayload.event="media_download" AND jsonPayload.reason="auth_401"
+```
+
+### The log-based metric — `media_download_counter`
+
+Same shape as `gemini_parse_counter`: one counter, `reason`/`outcome` labels,
+every question a slice. (A second *metric* rather than more labels on the first
+because it's a different **event family** with its own filter — the
+label-before-metric rule applies to questions within a family, not across them.)
+
+```yaml
+# media-download-counter.yaml
+description: WhatsApp media-download failures, labelled by outcome / reason
+filter: |-
+  resource.type="cloud_run_revision"
+      AND resource.labels.service_name="catering-ledger-webhook"
+      AND jsonPayload.event="media_download"
+labelExtractors:
+  outcome: EXTRACT(jsonPayload.outcome)
+  reason: EXTRACT(jsonPayload.reason)
+metricDescriptor:
+  metricKind: DELTA
+  valueType: INT64
+  unit: '1'
+  labels:
+  - key: outcome
+  - key: reason
+```
+
+```bash
+gcloud logging metrics create media_download_counter \
+  --project=catering-ledger --config-from-file=media-download-counter.yaml
+gcloud logging metrics describe media_download_counter --project=catering-ledger
+```
+
+Chart as `logging/user/media_download_counter` grouped by `reason`. The gcloud
+traps above (PowerShell quoting, describe-after-create, **no backfill** — create
+the metric before deploying the emitting code) all apply.
+
+> `media_download_counter` counts from **2026-07-16**, created before the #44
+> code deployed — so no window is missing.
 
 ## Why this decides the durable-retry-queue go/no-go (#33 follow-up)
 
