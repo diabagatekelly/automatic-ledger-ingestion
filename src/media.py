@@ -18,6 +18,55 @@ import os
 import requests
 
 from src.graph import GRAPH_API_BASE, TIMEOUT_SECONDS
+from src.telemetry import log_event
+
+# Media-download failure telemetry (Issue #44). A failed download never reaches
+# Gemini, so it is INVISIBLE to the gemini_parse telemetry — the #5 expired-token
+# incident filled the Sheet with unreadable-image rows while every parse
+# dashboard stayed green. This event makes that failure mode queryable.
+# ``auth_401`` is split out deliberately: it is the token-expiry signature and
+# the single highest-value thing to notice.
+_EVENT_MEDIA_DOWNLOAD = "media_download"
+_OUTCOME_FAILURE = "failure"
+_REASON_AUTH_401 = "auth_401"
+_REASON_NOT_FOUND = "not_found"
+_REASON_TIMEOUT = "timeout"
+_REASON_OTHER = "other"
+
+
+def classify_download_error(exc: BaseException) -> str:
+    """Bucket a media-download exception into a stable ``reason`` label.
+
+    * ``auth_401`` — the Graph API rejected the access token (expired/revoked).
+    * ``not_found`` — the media id didn't resolve. Graph reports an unknown or
+      malformed id as a **400** GraphMethodException rather than a 404, so both
+      land here; 404 is kept for the direct download URL going stale.
+    * ``timeout`` — either hop exceeded ``TIMEOUT_SECONDS`` (connect or read).
+    * ``other`` — everything else (5xx, missing download URL, bugs).
+    """
+    if isinstance(exc, requests.Timeout):
+        return _REASON_TIMEOUT
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        if exc.response.status_code == 401:
+            return _REASON_AUTH_401
+        if exc.response.status_code in (400, 404):
+            return _REASON_NOT_FOUND
+    return _REASON_OTHER
+
+
+def log_download_failure(exc: BaseException) -> None:
+    """Emit one structured ``media_download`` failure line for #44 telemetry.
+
+    Always WARNING: unlike a ``needs_review`` row, a failed download means the
+    receipt's content is genuinely lost to the ledger (the row lands as an
+    unreadable-image marker the owner must redo by hand).
+    """
+    log_event(
+        _EVENT_MEDIA_DOWNLOAD,
+        _OUTCOME_FAILURE,
+        severity="WARNING",
+        reason=classify_download_error(exc),
+    )
 
 
 def _access_token() -> str:

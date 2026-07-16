@@ -22,6 +22,8 @@ from typing import Any
 from google import genai
 from google.genai import errors, types
 
+from src.telemetry import log_event
+
 logger = logging.getLogger(__name__)
 
 # Alias for the current Gemini Flash-Lite model (aliases avoid pins that get
@@ -96,6 +98,7 @@ _RETRY_JITTER = 0.25  # add [0, delay * _RETRY_JITTER] to avoid synchronised ret
 _REASON_TRANSIENT_429 = "transient_429"
 _REASON_TRANSIENT_503 = "transient_503"
 _REASON_NO_API_KEY = "no_api_key"
+_REASON_INVALID_API_KEY = "invalid_api_key"
 _REASON_BAD_JSON = "bad_json"
 _REASON_EMPTY_RESPONSE = "empty_response"
 _REASON_BAD_REQUEST_400 = "bad_request_400"
@@ -131,6 +134,24 @@ class EmptyResponseError(RuntimeError):
     garbage" when in fact the model sent nothing. Different cause, different fix."""
 
 
+def _is_invalid_api_key(exc: errors.APIError) -> bool:
+    """Whether an APIError carries Google's API_KEY_INVALID signature.
+
+    The REAL Gemini API rejects a bad key as **400 INVALID_ARGUMENT** — not the
+    401/403 you'd guess (verified live 2026-07-16, the third time a live call
+    disproved a green-mocked assumption). The machine-readable marker is an
+    ErrorInfo detail with ``reason: API_KEY_INVALID``; matching that (never the
+    human-readable message) keeps this stable across wording changes.
+    """
+    error = exc.details.get("error") if isinstance(exc.details, dict) else None
+    details = error.get("details") if isinstance(error, dict) else None
+    if not isinstance(details, list):
+        return False
+    return any(
+        isinstance(detail, dict) and detail.get("reason") == "API_KEY_INVALID" for detail in details
+    )
+
+
 def _classify_error(exc: BaseException) -> str:
     """Bucket a parse exception into a stable ``reason`` (telemetry + retry).
 
@@ -142,6 +163,14 @@ def _classify_error(exc: BaseException) -> str:
             return _REASON_TRANSIENT_429
         if exc.code == 503:
             return _REASON_TRANSIENT_503
+        # A key that is PRESENT but rejected (revoked, mistyped, wrong project).
+        # Distinct from no_api_key — same blind-spot family as #44's auth_401:
+        # both are config errors, but "mount the secret" and "fix the key" are
+        # different runbooks. Checked BEFORE the 400 bucket because the real API
+        # reports an invalid key as a 400, where it would otherwise hide; 401/403
+        # kept as a belt-and-braces net for other auth-shaped rejections.
+        if _is_invalid_api_key(exc) or exc.code in (401, 403):
+            return _REASON_INVALID_API_KEY
         # How the API rejects unusable input — corrupt image bytes, an
         # unsupported mime type, an oversized payload. Split out because that is
         # an actionable "the thing we sent was wrong", unlike a generic failure.
@@ -178,19 +207,13 @@ def _log_parse_outcome(
     and this trigger is expected to fire often, so crying wolf about it would
     train the reader to ignore the level.
     """
-    detail = f" reason={reason}" if reason else ""
-    detail += f" confidence={confidence}" if confidence else ""
-    entry: dict[str, str] = {
-        "severity": "WARNING" if outcome == _OUTCOME_FALLBACK else "INFO",
-        "message": f"gemini_parse outcome={outcome}{detail}",
-        "event": "gemini_parse",
-        "outcome": outcome,
-    }
-    if reason is not None:
-        entry["reason"] = reason
-    if confidence is not None:
-        entry["confidence"] = confidence
-    print(json.dumps(entry), flush=True)
+    log_event(
+        "gemini_parse",
+        outcome,
+        severity="WARNING" if outcome == _OUTCOME_FALLBACK else "INFO",
+        reason=reason,
+        confidence=confidence,
+    )
 
 
 @dataclass(frozen=True)
