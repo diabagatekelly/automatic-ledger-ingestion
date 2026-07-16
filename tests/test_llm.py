@@ -417,6 +417,36 @@ def test_classify_error_buckets_every_failure_mode() -> None:
     assert _classify_error(_api_error(401)) == "invalid_api_key"
     assert _classify_error(_api_error(403)) == "invalid_api_key"
     assert _classify_error(_api_error(418)) == "other"
+
+
+def test_classify_error_spots_an_invalid_key_inside_a_400() -> None:
+    """The REAL Gemini API rejects a bad key as 400 API_KEY_INVALID, not 401.
+
+    Verified live 2026-07-16: a junk key raises APIError(code=400,
+    status=INVALID_ARGUMENT) with an ErrorInfo detail reason=API_KEY_INVALID.
+    Without this check the invalid-key case hides inside bad_request_400 —
+    which reads as "the thing we sent was wrong", the wrong runbook entirely.
+    """
+    invalid_key = errors.APIError(
+        400,
+        {
+            "error": {
+                "code": 400,
+                "message": "API key not valid. Please pass a valid API key.",
+                "status": "INVALID_ARGUMENT",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                        "reason": "API_KEY_INVALID",
+                        "domain": "googleapis.com",
+                    }
+                ],
+            }
+        },
+    )
+    assert _classify_error(invalid_key) == "invalid_api_key"
+    # A 400 WITHOUT the API_KEY_INVALID signature stays bad_request_400.
+    assert _classify_error(_api_error(400)) == "bad_request_400"
     assert _classify_error(MissingAPIKeyError("no key")) == "no_api_key"
     assert _classify_error(EmptyResponseError("empty")) == "empty_response"
     assert _classify_error(json.JSONDecodeError("bad", "doc", 0)) == "bad_json"

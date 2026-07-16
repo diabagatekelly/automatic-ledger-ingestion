@@ -34,9 +34,11 @@ without its own event is exactly how a media outage stayed invisible (see below)
 | `confidence` | on `success` and `needs_review`: `high` \| `low` — absent on `fallback` |
 
 `no_api_key` vs `invalid_api_key` (#44): the first means the key isn't **mounted**
-(fix the secret/deploy); the second means it's mounted but **rejected** — 401/403:
-revoked, mistyped, wrong project (fix the key). Same blind-spot family, different
-runbooks, and `other` used to hide the latter.
+(fix the secret/deploy); the second means it's mounted but **rejected** — revoked,
+mistyped, wrong project (fix the key). Same blind-spot family, different runbooks.
+⚠️ The real API rejects a bad key as **400 `API_KEY_INVALID`**, not 401/403
+(verified live 2026-07-16) — the classifier matches the ErrorInfo `reason`, so it
+doesn't hide inside `bad_request_400`.
 
 ### The three outcomes
 
