@@ -267,6 +267,9 @@ def test_webhook_post_emits_media_download_telemetry_when_download_fails(
     ]
     media_events = [e for e in entries if e.get("event") == "media_download"]
     assert len(media_events) == 1
+    # Lock the full schema, not just the reason — this line is what the
+    # log-based metric counts, so any drift here is a silent data loss.
+    assert media_events[0]["severity"] == "WARNING"
     assert media_events[0]["outcome"] == "failure"
     assert media_events[0]["reason"] == "auth_401"
 
