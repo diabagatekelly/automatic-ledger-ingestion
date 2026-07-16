@@ -412,6 +412,10 @@ def test_classify_error_buckets_every_failure_mode() -> None:
     assert _classify_error(_api_error(429)) == "transient_429"
     assert _classify_error(_api_error(503)) == "transient_503"
     assert _classify_error(_api_error(400)) == "bad_request_400"
+    # An INVALID key (present but rejected) is distinct from a MISSING one:
+    # both are config errors, but they have different fixes (#44).
+    assert _classify_error(_api_error(401)) == "invalid_api_key"
+    assert _classify_error(_api_error(403)) == "invalid_api_key"
     assert _classify_error(_api_error(418)) == "other"
     assert _classify_error(MissingAPIKeyError("no key")) == "no_api_key"
     assert _classify_error(EmptyResponseError("empty")) == "empty_response"

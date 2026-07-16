@@ -18,7 +18,7 @@ import functions_framework
 from flask import Request
 
 from src.llm import parse_image, parse_note
-from src.media import download_media
+from src.media import download_media, log_download_failure
 from src.messaging import send_text_message
 from src.sheets import append_row, build_row, build_row_from_note
 from src.whatsapp import (
@@ -142,9 +142,13 @@ def _row_for_image(image: InboundImage, today: date) -> list[str]:
     note = None
     try:
         image_bytes, mime_type = download_media(image.media_id)
-    except Exception:
+    except Exception as exc:
         # Only the download is in the try: parse_image handles its own failures
         # internally (returns None + logs), so the message stays accurate.
+        # One structured media_download line (#44) — a failed download never
+        # reaches Gemini, so without it a media/token outage is invisible to
+        # every gemini_parse dashboard while the Sheet fills with marker rows.
+        log_download_failure(exc)
         logger.warning("Receipt image download failed; falling back to raw row", exc_info=True)
     else:
         note = parse_image(image_bytes, mime_type, today, image.caption)

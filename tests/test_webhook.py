@@ -234,6 +234,43 @@ def test_webhook_post_appends_marker_row_when_media_download_fails(
     assert rows[0][6] == _UNREADABLE_IMAGE_NOTE  # exact marker lands in Source/Notes
 
 
+def test_webhook_post_emits_media_download_telemetry_when_download_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A download failure emits one queryable media_download line (#44).
+
+    Without it, a media/token outage is invisible: gemini_parse never fires
+    (Gemini is never reached) so every dashboard stays green while the ledger
+    fills with unreadable-image rows — the #5 expired-token incident's shape.
+    """
+    import json
+
+    import requests
+
+    monkeypatch.setattr("src.main.append_row", lambda row: None)
+
+    def unauthorized(media_id: str) -> object:
+        response = requests.Response()
+        response.status_code = 401
+        raise requests.HTTPError("401 Unauthorized", response=response)
+
+    monkeypatch.setattr("src.main.download_media", unauthorized)
+
+    _, status = webhook(FakeRequest("POST", json=image_message_envelope("media-1")))  # type: ignore[arg-type]
+
+    assert status == 200  # the fallback row still lands; telemetry is additive
+    entries = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip().startswith("{")
+    ]
+    media_events = [e for e in entries if e.get("event") == "media_download"]
+    assert len(media_events) == 1
+    assert media_events[0]["outcome"] == "failure"
+    assert media_events[0]["reason"] == "auth_401"
+
+
 def test_webhook_post_appends_a_row_for_both_text_and_image_in_one_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

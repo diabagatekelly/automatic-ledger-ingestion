@@ -1,8 +1,10 @@
+import json
 from typing import Any
 
 import pytest
+import requests
 
-from src.media import download_media
+from src.media import classify_download_error, download_media, log_download_failure
 
 
 class FakeHTTPResponse:
@@ -103,3 +105,56 @@ def test_download_media_raises_when_metadata_has_no_url(monkeypatch: pytest.Monk
     monkeypatch.setattr("src.media.requests", fake)
     with pytest.raises(RuntimeError, match="no download URL"):
         download_media("media-1")
+
+
+# --- media-download failure telemetry (Issue #44) ---
+# A download failure never reaches Gemini, so it is invisible to the
+# gemini_parse telemetry — it gets its own event with its own reason buckets.
+
+
+def _http_error(status_code: int) -> requests.HTTPError:
+    """Build a requests.HTTPError carrying a response with the given status."""
+    response = requests.Response()
+    response.status_code = status_code
+    return requests.HTTPError(f"{status_code} error", response=response)
+
+
+def test_classify_download_error_buckets_every_failure_mode() -> None:
+    # auth_401 is split out deliberately: it's the token-expiry signature (#5).
+    assert classify_download_error(_http_error(401)) == "auth_401"
+    assert classify_download_error(_http_error(404)) == "not_found"
+    # Graph resolves an unknown/malformed media id as a 400 GraphMethodException.
+    assert classify_download_error(_http_error(400)) == "not_found"
+    assert classify_download_error(_http_error(500)) == "other"
+    assert classify_download_error(requests.Timeout("slow")) == "timeout"
+    # Subclasses (connect/read timeouts) bucket the same.
+    assert classify_download_error(requests.ConnectTimeout("slow")) == "timeout"
+    # An HTTPError without an attached response can't be bucketed by status.
+    assert classify_download_error(requests.HTTPError("bare")) == "other"
+    assert classify_download_error(RuntimeError("metadata has no download URL")) == "other"
+
+
+def test_log_download_failure_emits_one_structured_warning_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log_download_failure(_http_error(401))
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert len(lines) == 1
+    entry = lines[0]
+    # Assert the full structured-log contract, not just the reason: this is the
+    # schema Cloud Run parses into jsonPayload and the log-based metric counts.
+    assert entry["severity"] == "WARNING"
+    assert entry["event"] == "media_download"
+    assert entry["outcome"] == "failure"
+    assert entry["reason"] == "auth_401"
+    assert entry["message"].startswith("media_download outcome=failure")
+
+
+def test_log_download_failure_reason_follows_the_classifier(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log_download_failure(requests.Timeout("slow"))
+
+    entry = json.loads(capsys.readouterr().out.strip())
+    assert entry["reason"] == "timeout"

@@ -22,6 +22,8 @@ from typing import Any
 from google import genai
 from google.genai import errors, types
 
+from src.telemetry import log_event
+
 logger = logging.getLogger(__name__)
 
 # Alias for the current Gemini Flash-Lite model (aliases avoid pins that get
@@ -96,6 +98,7 @@ _RETRY_JITTER = 0.25  # add [0, delay * _RETRY_JITTER] to avoid synchronised ret
 _REASON_TRANSIENT_429 = "transient_429"
 _REASON_TRANSIENT_503 = "transient_503"
 _REASON_NO_API_KEY = "no_api_key"
+_REASON_INVALID_API_KEY = "invalid_api_key"
 _REASON_BAD_JSON = "bad_json"
 _REASON_EMPTY_RESPONSE = "empty_response"
 _REASON_BAD_REQUEST_400 = "bad_request_400"
@@ -147,6 +150,12 @@ def _classify_error(exc: BaseException) -> str:
         # an actionable "the thing we sent was wrong", unlike a generic failure.
         if exc.code == 400:
             return _REASON_BAD_REQUEST_400
+        # A key that is PRESENT but rejected (revoked, mistyped, wrong project).
+        # Distinct from no_api_key — same blind-spot family as #44's auth_401:
+        # both are config errors, but "mount the secret" and "fix the key" are
+        # different runbooks, and `other` hides them both.
+        if exc.code in (401, 403):
+            return _REASON_INVALID_API_KEY
         return _REASON_OTHER
     if isinstance(exc, MissingAPIKeyError):
         return _REASON_NO_API_KEY
@@ -178,19 +187,13 @@ def _log_parse_outcome(
     and this trigger is expected to fire often, so crying wolf about it would
     train the reader to ignore the level.
     """
-    detail = f" reason={reason}" if reason else ""
-    detail += f" confidence={confidence}" if confidence else ""
-    entry: dict[str, str] = {
-        "severity": "WARNING" if outcome == _OUTCOME_FALLBACK else "INFO",
-        "message": f"gemini_parse outcome={outcome}{detail}",
-        "event": "gemini_parse",
-        "outcome": outcome,
-    }
-    if reason is not None:
-        entry["reason"] = reason
-    if confidence is not None:
-        entry["confidence"] = confidence
-    print(json.dumps(entry), flush=True)
+    log_event(
+        "gemini_parse",
+        outcome,
+        severity="WARNING" if outcome == _OUTCOME_FALLBACK else "INFO",
+        reason=reason,
+        confidence=confidence,
+    )
 
 
 @dataclass(frozen=True)
