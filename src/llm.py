@@ -148,8 +148,7 @@ def _is_invalid_api_key(exc: errors.APIError) -> bool:
     if not isinstance(details, list):
         return False
     return any(
-        isinstance(detail, dict) and detail.get("reason") == "API_KEY_INVALID"
-        for detail in details
+        isinstance(detail, dict) and detail.get("reason") == "API_KEY_INVALID" for detail in details
     )
 
 
