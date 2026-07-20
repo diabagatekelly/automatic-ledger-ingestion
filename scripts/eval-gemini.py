@@ -62,15 +62,20 @@ def _load_cases(path: str) -> list[dict]:
     return cases
 
 
-def _resolve_image_path(case: dict) -> str:
-    """Absolute path to an image case's file (relative paths are repo-root based)."""
+def _resolve_image_path(case: dict, dataset_dir: str) -> str:
+    """Absolute path to an image case's file.
+
+    A relative ``image`` path is resolved against the directory of the dataset
+    that supplied the case (not a fixed default), so a custom ``--dataset`` in
+    another directory can carry its own images alongside it.
+    """
     image_path = case["image"]
     if not os.path.isabs(image_path):
-        image_path = os.path.join(os.path.dirname(_DEFAULT_DATASET), "..", image_path)
+        image_path = os.path.join(dataset_dir, image_path)
     return image_path
 
 
-def _run_case(case: dict, today: date) -> tuple[ParsedNote | None, float]:
+def _run_case(case: dict, today: date, dataset_dir: str) -> tuple[ParsedNote | None, float]:
     """Parse one case (text or image) against Gemini; return (parsed, latency_s).
 
     ``parse_note``/``parse_image`` swallow their own failures and return ``None``
@@ -82,7 +87,7 @@ def _run_case(case: dict, today: date) -> tuple[ParsedNote | None, float]:
     kind = case.get("kind", "text")
     started = time.perf_counter()
     if kind == "image":
-        with open(_resolve_image_path(case), "rb") as handle:
+        with open(_resolve_image_path(case, dataset_dir), "rb") as handle:
             image_bytes = handle.read()
         mime_type = mimetypes.guess_type(case["image"])[0] or "image/jpeg"
         parsed = parse_image(image_bytes, mime_type, today, caption=case.get("caption", ""))
@@ -115,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     today = date.fromisoformat(args.reference_date)
+    dataset_dir = os.path.dirname(os.path.abspath(args.dataset))
     cases = _load_cases(args.dataset)
     if args.limit is not None:
         cases = cases[: args.limit]
@@ -127,7 +133,9 @@ def main(argv: list[str] | None = None) -> int:
     # reproducible for anyone cloning — rather than crashing the whole eval.
     runnable = []
     for case in cases:
-        if case.get("kind") == "image" and not os.path.exists(_resolve_image_path(case)):
+        if case.get("kind") == "image" and not os.path.exists(
+            _resolve_image_path(case, dataset_dir)
+        ):
             print(f"  {case['id']:<28} SKIPPED   (image not found locally)")
             continue
         runnable.append(case)
@@ -139,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     for index, case in enumerate(runnable):
         if index and args.sleep:
             time.sleep(args.sleep)  # pace under the free-tier RPM (see --sleep)
-        parsed, latency_s = _run_case(case, today)
+        parsed, latency_s = _run_case(case, today, dataset_dir)
         result = score_case(
             case["id"],
             case["expected"],

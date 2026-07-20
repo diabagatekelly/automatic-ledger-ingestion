@@ -172,7 +172,10 @@ def aggregate(results: list[CaseResult], *, model: str, run_date: str) -> Scorec
     exact_matches = sum(1 for r in results if r.exact_match)
     latencies = [r.latency_s for r in results]
 
-    labelled = [r for r in results if r.confidence_expected is not None]
+    # Only PARSED ambiguous cases: a labelled case that fell back has
+    # confidence_correct=None (no confidence was produced), and counting that as
+    # an incorrect prediction would blame the model for an infra fallback.
+    labelled = [r for r in results if r.confidence_expected is not None and not r.fell_back]
     confidence_accuracy: float | None = None
     if labelled:
         confidence_accuracy = sum(1 for r in labelled if r.confidence_correct) / len(labelled)

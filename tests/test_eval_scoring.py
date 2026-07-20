@@ -14,6 +14,7 @@ from evals.scoring import (
     aggregate,
     amounts_equal,
     field_equal,
+    format_scorecard,
     percentile,
     score_case,
 )
@@ -222,6 +223,63 @@ def test_aggregate_all_fallbacks_has_no_per_field_denominator() -> None:
     # No parsed cases -> per-field accuracy is undefined, reported as None.
     assert card.per_field_accuracy["amount"] is None
     assert card.overall_exact_match_rate == 0.0
+
+
+def test_aggregate_confidence_excludes_labelled_fallbacks() -> None:
+    # A labelled ambiguous case that FELL BACK has no confidence to judge, so it
+    # must be excluded from the denominator — not counted as an incorrect guess.
+    results = [
+        score_case(
+            "amb-parsed",
+            _expected(amount=""),
+            _parsed(amount="", confidence="low"),
+            latency_s=0.1,
+            expected_confidence="low",
+        ),
+        score_case(
+            "amb-fellback", _expected(amount=""), None, latency_s=0.2, expected_confidence="low"
+        ),
+    ]
+    card = aggregate(results, model="m", run_date="2026-07-20")
+    # Only the parsed labelled case counts -> 1 of 1, not 1 of 2.
+    assert card.confidence_labelled == 1
+    assert card.confidence_accuracy == 1.0
+
+
+# --- format_scorecard --------------------------------------------------------
+
+
+def test_format_scorecard_includes_key_lines_and_confidence() -> None:
+    results = [
+        score_case("ok", _expected(), _parsed(), latency_s=0.2),
+        # A parsed labelled case that misses on amount (expected blank, got "5")
+        # -> not exact, so overall exact-match is 50%, but confidence is judged.
+        score_case(
+            "amb",
+            _expected(amount=""),
+            _parsed(amount="5", confidence="low"),
+            latency_s=0.3,
+            expected_confidence="low",
+        ),
+    ]
+    text = format_scorecard(aggregate(results, model="gemini-x", run_date="2026-07-20"))
+    assert "gemini-x" in text
+    assert "2026-07-20" in text
+    assert "overall exact-match: 50%" in text
+    assert "fallback rate:       0%" in text
+    assert "date           100%" in text
+    # A labelled ambiguous case -> the confidence line is present.
+    assert "confidence (ambiguous cases): 100%" in text
+    assert "p50 0.20s" in text
+
+
+def test_format_scorecard_shows_na_and_omits_confidence_when_none() -> None:
+    # All fallbacks -> per-field is n/a, and with no labelled cases the
+    # confidence line is omitted entirely.
+    results = [score_case("f1", _expected(), None, latency_s=0.1)]
+    text = format_scorecard(aggregate(results, model="m", run_date="2026-07-20"))
+    assert "amount         n/a" in text
+    assert "confidence (ambiguous cases)" not in text
 
 
 # --- percentile --------------------------------------------------------------
