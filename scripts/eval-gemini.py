@@ -73,6 +73,11 @@ def _load_cases(paths: list[str]) -> list[dict]:
                     case = json.loads(line)
                 except json.JSONDecodeError as exc:
                     raise SystemExit(f"{path}:{line_no}: invalid JSON — {exc}") from exc
+                if not isinstance(case, dict):
+                    raise SystemExit(
+                        f"{path}:{line_no}: each line must be a JSON object, got "
+                        f"{type(case).__name__}"
+                    )
                 case[_SOURCE_DIR_KEY] = source_dir
                 cases.append(case)
     return cases
@@ -127,7 +132,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--reference-date", default=_REFERENCE_DATE, help="Fixed 'today' for parses."
     )
-    parser.add_argument("--limit", type=int, default=None, help="Only run the first N cases.")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Only run the first N cases of the concatenated datasets (in --dataset order).",
+    )
     parser.add_argument(
         "--sleep",
         type=float,
