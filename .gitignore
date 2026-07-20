@@ -34,9 +34,12 @@ CLAUDE.local.md
 docs/STATUS.md
 docs/WORKFLOW.md
 
-# --- Eval receipt photos: real customer receipts w/ PII — keep LOCAL only ---
-# The public repo must not publish real business/client data. The eval runner
-# (scripts/eval-gemini.py) skips any image case whose file is absent, so the
-# text half stays reproducible for anyone; drop the photos here to run the
-# image half locally (see docs/EVAL_BASELINE.md).
+# --- Eval receipt photos + sensitive cases: real customer data — keep LOCAL ---
+# The public repo must not publish real business/client data. The photos, and
+# any eval case whose GROUND TRUTH is a real client name (so the label must
+# match the private image), live only on the machine that has the receipts.
+# The runner takes multiple --dataset files and skips image cases whose file is
+# absent, so the committed text+generic-image half stays reproducible for anyone
+# (see docs/EVAL_BASELINE.md).
 evals/images/
+evals/dataset.local.jsonl

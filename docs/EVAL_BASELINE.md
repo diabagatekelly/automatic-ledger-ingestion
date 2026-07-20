@@ -11,20 +11,28 @@ in CI — nondeterministic and costs quota).
 
 ```bash
 export GEMINI_API_KEY=...              # from Google AI Studio (see .env.example)
-python scripts/eval-gemini.py          # full dataset -> prints the scorecard
+python scripts/eval-gemini.py          # committed dataset -> prints the scorecard
 python scripts/eval-gemini.py --limit 3   # quick smoke
+# fold in the gitignored local set (real-client receipts kept out of git):
+python scripts/eval-gemini.py --dataset evals/dataset.jsonl evals/dataset.local.jsonl
 ```
 
-- **Dataset:** `evals/dataset.jsonl` — one labeled case per line (`text` or
-  `image` kind), each with the five scored fields + an optional
-  `expected_confidence` for deliberately-ambiguous cases.
-- **Receipt photos are LOCAL-only.** The `image` cases point at real customer
-  receipts (business/client PII) that are **gitignored** (`evals/images/`) so the
-  public repo never publishes them. The runner **skips** any image case whose
-  file is absent, so the text half stays reproducible for anyone cloning; the
-  baseline below (with the image cases) was produced on the machine that has the
-  photos on disk. To reproduce the image half, drop the receipts in
-  `evals/images/` under the filenames the dataset references.
+- **Committed dataset:** `evals/dataset.jsonl` — one labeled case per line
+  (`text` or `image` kind), each with the five scored fields + an optional
+  `expected_confidence` for deliberately-ambiguous cases. Contains only data safe
+  to publish: text notes with **fictional** client names, plus two image cases
+  whose ground truth reveals no client (a supermarket receipt, contract blank; a
+  non-receipt photo).
+- **Real customer data is LOCAL-only** — two things stay off the public repo and
+  live only on the machine that has the receipts:
+  1. the **receipt photos** themselves (`evals/images/`, gitignored); and
+  2. any case whose **ground truth is a real client name** — the two real-client
+     invoices live in `evals/dataset.local.jsonl` (gitignored). Their correct
+     answer *must* match the private image, so an anonymized label would score
+     the (correct) model output as wrong; keeping the whole case local avoids that.
+  The runner takes several `--dataset` files and **skips** any image case whose
+  file is absent, so the committed half stays fully reproducible for anyone
+  cloning. `--dataset evals/dataset.jsonl evals/dataset.local.jsonl` runs both.
 - **Scorer:** `evals/scoring.py` (pure, unit-tested in `tests/test_eval_scoring.py`).
 - **Reproducibility:** every case parses against a **fixed reference date**
   (`--reference-date`, default `2026-07-20`), never `date.today()` — otherwise the
@@ -54,29 +62,37 @@ python scripts/eval-gemini.py --limit 3   # quick smoke
 
 Model alias `gemini-flash-lite-latest`, which currently resolves to
 **`gemini-3.1-flash-lite`** (seen in a `429` quota payload — the alias tracks the
-live model, so record the resolved id alongside it). 22 cases (18 text + 4 real
-receipt photos), `--sleep 4`.
+live model, so record the resolved id alongside it). `--sleep 4`.
+
+**Committed dataset — 20 cases** (18 text + 2 non-sensitive image cases):
 
 ```
-overall exact-match: 77%   (17/22)
+overall exact-match: 75%   (15/20)
 fallback rate:       0%
 per-field accuracy (over parsed cases):
   date           100%
-  contract_name   91%
-  category         86%
-  type             86%
-  amount           91%
+  contract_name   90%
+  category         85%
+  type             85%
+  amount           90%
 confidence (ambiguous cases): 100%  (3 labelled)
-latency: p50 1.92s  p95 3.82s
+latency: p50 1.81s  p95 3.05s
 ```
 
-### What the five misses tell us (all informative, none infra)
+**Full run incl. the 2 local real-client receipts — 22 cases** (for the machine
+that has `evals/dataset.local.jsonl` + the photos): **both real-client invoices
+scored *exact*** — a handwritten French/CFA invoice and an electronic invoice
+carrying **two dates** (invoice date vs. an earlier order date), where the model
+correctly picked the invoice date. Adding those two exact cases nudges the full
+numbers to overall **73–77%** exact, contract/amount **90–91%** (a network blip
+cost one spurious fallback on the local run — it's isolated in the fallback rate,
+not the per-field numbers). The image path is strong on genuine documents.
 
-- **All three real receipt photos scored *exact*** — including a handwritten
-  French/CFA invoice (ONEP, 555 000) and an electronic invoice carrying **two
-  dates** (`img-bad-cafe-revenue`: invoice `09/04/2026` vs. an order date of
-  `03 avril`), where the model correctly picked the invoice date. So the image
-  path is strong on genuine documents; the misses are all edge cases.
+### What the five committed misses tell us (all informative, none infra)
+
+- **The one committed real-receipt image scored *exact*** — the supermarket
+  ingredients receipt (`img-supermarket-fish-expense`). Combined with the two
+  local client invoices (both exact), every genuine receipt parsed correctly.
 - **`contract_name` (2 misses) is the fuzziest field** — both misses are "who
   counts as the contract":
   - *meat-owed-by-us* — the model treated the **supplier** ("the butcher") as the

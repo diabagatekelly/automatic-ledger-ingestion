@@ -11,9 +11,10 @@ prompt tweak that quietly worsens a field). Commit the printed block as the
 baseline so future prompt/model changes are measured against a known number.
 
     export GEMINI_API_KEY=...            # from Google AI Studio
-    python scripts/eval-gemini.py                       # full dataset
+    python scripts/eval-gemini.py                       # committed dataset
     python scripts/eval-gemini.py --limit 3             # quick smoke
-    python scripts/eval-gemini.py --dataset other.jsonl
+    # fold in a gitignored local set (real-client receipts kept out of git):
+    python scripts/eval-gemini.py --dataset evals/dataset.jsonl evals/dataset.local.jsonl
 
 Makes real, quota-costing API calls against the free tier; writes no Sheet. Not
 part of CI (nondeterministic + costs quota).
@@ -47,35 +48,55 @@ _DEFAULT_DATASET = os.path.join(
 _REFERENCE_DATE = "2026-07-20"
 
 
-def _load_cases(path: str) -> list[dict]:
-    """Read the JSONL dataset into a list of case dicts (blank lines skipped)."""
+# Where a case came from — stashed on each case at load time so a relative image
+# path resolves against ITS OWN dataset's directory, not a single shared one.
+# This lets several datasets (e.g. the committed one + a gitignored local one
+# carrying sensitive receipts) be scored together in one run.
+_SOURCE_DIR_KEY = "__source_dir__"
+
+
+def _load_cases(paths: list[str]) -> list[dict]:
+    """Read one or more JSONL datasets into a flat list of case dicts.
+
+    Blank lines are skipped; each case is tagged with the absolute directory of
+    the dataset file it came from (``_SOURCE_DIR_KEY``) for image resolution.
+    """
     cases = []
-    with open(path, encoding="utf-8") as handle:
-        for line_no, line in enumerate(handle, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                cases.append(json.loads(line))
-            except json.JSONDecodeError as exc:
-                raise SystemExit(f"{path}:{line_no}: invalid JSON — {exc}") from exc
+    for path in paths:
+        source_dir = os.path.dirname(os.path.abspath(path))
+        with open(path, encoding="utf-8") as handle:
+            for line_no, line in enumerate(handle, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    case = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise SystemExit(f"{path}:{line_no}: invalid JSON — {exc}") from exc
+                if not isinstance(case, dict):
+                    raise SystemExit(
+                        f"{path}:{line_no}: each line must be a JSON object, got "
+                        f"{type(case).__name__}"
+                    )
+                case[_SOURCE_DIR_KEY] = source_dir
+                cases.append(case)
     return cases
 
 
-def _resolve_image_path(case: dict, dataset_dir: str) -> str:
+def _resolve_image_path(case: dict) -> str:
     """Absolute path to an image case's file.
 
-    A relative ``image`` path is resolved against the directory of the dataset
-    that supplied the case (not a fixed default), so a custom ``--dataset`` in
-    another directory can carry its own images alongside it.
+    A relative ``image`` path resolves against the directory of the dataset that
+    supplied the case (tagged at load), so each dataset can carry its own images
+    alongside it.
     """
     image_path = case["image"]
     if not os.path.isabs(image_path):
-        image_path = os.path.join(dataset_dir, image_path)
+        image_path = os.path.join(case[_SOURCE_DIR_KEY], image_path)
     return image_path
 
 
-def _run_case(case: dict, today: date, dataset_dir: str) -> tuple[ParsedNote | None, float]:
+def _run_case(case: dict, today: date) -> tuple[ParsedNote | None, float]:
     """Parse one case (text or image) against Gemini; return (parsed, latency_s).
 
     ``parse_note``/``parse_image`` swallow their own failures and return ``None``
@@ -87,7 +108,7 @@ def _run_case(case: dict, today: date, dataset_dir: str) -> tuple[ParsedNote | N
     kind = case.get("kind", "text")
     started = time.perf_counter()
     if kind == "image":
-        with open(_resolve_image_path(case, dataset_dir), "rb") as handle:
+        with open(_resolve_image_path(case), "rb") as handle:
             image_bytes = handle.read()
         mime_type = mimetypes.guess_type(case["image"])[0] or "image/jpeg"
         parsed = parse_image(image_bytes, mime_type, today, caption=case.get("caption", ""))
@@ -98,11 +119,25 @@ def _run_case(case: dict, today: date, dataset_dir: str) -> tuple[ParsedNote | N
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Live Gemini accuracy eval (Issue #30).")
-    parser.add_argument("--dataset", default=_DEFAULT_DATASET, help="Path to the JSONL dataset.")
+    parser.add_argument(
+        "--dataset",
+        nargs="+",
+        default=[_DEFAULT_DATASET],
+        help=(
+            "One or more JSONL datasets to score together. Defaults to the "
+            "committed dataset; pass e.g. `--dataset evals/dataset.jsonl "
+            "evals/dataset.local.jsonl` to fold in a gitignored local set."
+        ),
+    )
     parser.add_argument(
         "--reference-date", default=_REFERENCE_DATE, help="Fixed 'today' for parses."
     )
-    parser.add_argument("--limit", type=int, default=None, help="Only run the first N cases.")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Only run the first N cases of the concatenated datasets (in --dataset order).",
+    )
     parser.add_argument(
         "--sleep",
         type=float,
@@ -120,7 +155,6 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     today = date.fromisoformat(args.reference_date)
-    dataset_dir = os.path.dirname(os.path.abspath(args.dataset))
     cases = _load_cases(args.dataset)
     if args.limit is not None:
         cases = cases[: args.limit]
@@ -133,9 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     # reproducible for anyone cloning — rather than crashing the whole eval.
     runnable = []
     for case in cases:
-        if case.get("kind") == "image" and not os.path.exists(
-            _resolve_image_path(case, dataset_dir)
-        ):
+        if case.get("kind") == "image" and not os.path.exists(_resolve_image_path(case)):
             print(f"  {case['id']:<28} SKIPPED   (image not found locally)")
             continue
         runnable.append(case)
@@ -147,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
     for index, case in enumerate(runnable):
         if index and args.sleep:
             time.sleep(args.sleep)  # pace under the free-tier RPM (see --sleep)
-        parsed, latency_s = _run_case(case, today, dataset_dir)
+        parsed, latency_s = _run_case(case, today)
         result = score_case(
             case["id"],
             case["expected"],
