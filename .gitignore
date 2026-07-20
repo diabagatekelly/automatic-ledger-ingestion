@@ -33,3 +33,10 @@ Thumbs.db
 CLAUDE.local.md
 docs/STATUS.md
 docs/WORKFLOW.md
+
+# --- Eval receipt photos: real customer receipts w/ PII — keep LOCAL only ---
+# The public repo must not publish real business/client data. The eval runner
+# (scripts/eval-gemini.py) skips any image case whose file is absent, so the
+# text half stays reproducible for anyone; drop the photos here to run the
+# image half locally (see docs/EVAL_BASELINE.md).
+evals/images/
